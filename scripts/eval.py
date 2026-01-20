@@ -9,6 +9,8 @@ import yaml
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 
+import platform
+
 from src.datasets.pt_dataset import PtWindowDataset
 from src.datasets.collate import collate_batch
 from src.models.build import build_model
@@ -18,6 +20,26 @@ from src.log import log_eval_to_csv
 from src.engine import evaluate                                 
 from src.scenarios import load_window_labels_csv
 
+def print_env_info(device: torch.device):
+    print("[ENV] Python:", platform.python_version())
+    print("[ENV] OS:", platform.platform())
+    print("[ENV] Torch:", torch.__version__)
+    print("[ENV] CUDA available:", torch.cuda.is_available())
+    print("[ENV] Torch CUDA:", torch.version.cuda)
+    print("[ENV] cuDNN:", torch.backends.cudnn.version())
+    try:
+        print("[ENV] torch.get_num_threads:", torch.get_num_threads())
+    except Exception:
+        pass
+
+    if device.type == "cuda":
+        idx = torch.cuda.current_device()
+        name = torch.cuda.get_device_name(idx)
+        prop = torch.cuda.get_device_properties(idx)
+        total_gb = prop.total_memory / (1024**3)
+        print(f"[ENV] GPU[{idx}]: {name}")
+        print(f"[ENV] GPU Mem: {total_gb:.2f} GB, SMs={prop.multi_processor_count}")
+    print()
 
 def _load_ckpt_state_dict(ckpt_path: Path) -> Dict[str, torch.Tensor]:
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -59,6 +81,7 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() and args.device.startswith("cuda") else "cpu")
     print(f"[INFO] device={device}")
+    print_env_info(device)
 
     # -------------------------
     # resolve paths
@@ -211,6 +234,10 @@ def main():
         save_event_path=save_event_path,
         save_state_path=save_state_path,
         epoch=epoch_for_csv,
+        measure_latency=True,
+        latency_iters=200,
+        latency_warmup=30,
+        latency_per_sample=True,
     )
 
     csv_out = Path(args.csv_out) if args.csv_out else None
@@ -233,7 +260,7 @@ def main():
             use_nb_static=use_nb_static,
             metrics=metrics,
         )
-        print(f"[OK] appended: {csv_out}")
+        print(f"\n[OK] appended: {csv_out}")
 
     print(f"[RESULT] loss={metrics['loss']:.6f} ADE={metrics['ade']:.6f} FDE={metrics['fde']:.6f}")
     print(  

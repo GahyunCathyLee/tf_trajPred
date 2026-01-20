@@ -16,7 +16,7 @@ from src.metrics import (
     ade, fde, ade_per_sample, fde_per_sample
 )
 from src.losses import trajectory_loss, multimodal_loss
-from src.utils import _to_int
+from src.utils import _to_int, measure_latency_ms
 from src.debug.debug import _any_nonfinite, _finite_stats, _check_params_finite
 
 # -------------------------
@@ -37,6 +37,10 @@ def evaluate(
     save_event_path: Path | None = None,
     save_state_path: Path | None = None,
     epoch: int | None = None,
+    measure_latency: bool = False,
+    latency_iters: int = 200,
+    latency_warmup: int = 30,
+    latency_per_sample: bool = True,
 ) -> Dict[str, float]:
     """
     Returns (overall):
@@ -77,6 +81,74 @@ def evaluate(
 
     # dt = 1/hz, and for finite-diff we use hz multiplier
     hz = float(data_hz)
+
+    if measure_latency:
+        # 1) get one batch (does NOT consume the main loop if we use iter(loader) fresh)
+        first = next(iter(loader))
+
+        x_ego_l = first["x_ego"].to(device, non_blocking=True)
+        x_nb_l = first["x_nb"].to(device, non_blocking=True)
+        nb_mask_l = first["nb_mask"].to(device, non_blocking=True)
+        x_last_abs_l = first["x_last_abs"].to(device, non_blocking=True)
+
+        B_lat = int(x_ego_l.shape[0])
+
+        def _one_infer():
+            # keep same autocast setting as eval
+            with autocast(device_type="cuda", enabled=use_amp):
+                out = model(x_ego_l, x_nb_l, nb_mask_l)
+
+                # minimal postprocess so that multimodal outputs do a similar amount of work
+                if isinstance(out, (tuple, list)):
+                    pred, scores = out
+                else:
+                    pred, scores = out, None
+
+                if pred.dim() == 4:
+                    # pred: (B,K,Tf,2)
+                    # choose one mode cheaply (avoid using y_abs/loss in latency)
+                    if scores is not None:
+                        best_idx = torch.argmax(scores, dim=1)
+                    else:
+                        best_idx = torch.zeros(pred.shape[0], device=pred.device, dtype=torch.long)
+
+                    if predict_delta:
+                        pred_abs_all = torch.cumsum(pred, dim=2) + x_last_abs_l[:, None, None, :]
+                    else:
+                        pred_abs_all = pred
+
+                    _ = pred_abs_all[torch.arange(pred.shape[0], device=pred.device), best_idx]
+                else:
+                    # single-mode: just run through (no need to compute abs if you only care forward cost)
+                    # but include delta->abs cost if your real inference requires it:
+                    if predict_delta:
+                        _ = torch.cumsum(pred, dim=1) + x_last_abs_l[:, None, :]
+                    else:
+                        _ = pred
+
+            return None
+
+        lat = measure_latency_ms(
+            fn=_one_infer,
+            device=device,
+            iters=latency_iters,
+            warmup=latency_warmup,
+        )
+
+        print()
+        if latency_per_sample and B_lat > 0:
+            div = float(B_lat)
+            print(
+                f"[LATENCY] avg={lat['avg_ms']/div:.3f} ms/sample "
+                f"(p50={lat['p50_ms']/div:.3f}, p90={lat['p90_ms']/div:.3f}, p99={lat['p99_ms']/div:.3f}) "
+                f"@batch={B_lat}, iters={int(lat['iters'])}"
+            )
+        else:
+            print(
+                f"[LATENCY] avg={lat['avg_ms']:.3f} ms/batch "
+                f"(p50={lat['p50_ms']:.3f}, p90={lat['p90_ms']:.3f}, p99={lat['p99_ms']:.3f}) "
+                f"@batch={B_lat}, iters={int(lat['iters'])}"
+            )
 
     # -------------------------
     # helper: kinematic per-sample ADE-style error

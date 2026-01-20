@@ -1,9 +1,13 @@
 # src/utils.py
+from __future__ import annotations
 import random
 import numpy as np
 import torch
 import torch.nn as nn
 from pathlib import Path
+
+from typing import Callable, Dict, Any, Optional
+import time
 
 def make_ttag(T: int, Tf: int, hz: int) -> str:
     return f"T{T}_Tf{Tf}_hz{hz}"
@@ -88,3 +92,49 @@ def _to_int(x):
     except Exception:
         pass
     return int(x)
+
+@torch.no_grad()
+def measure_latency_ms(
+    fn: Callable[[], Any],
+    device: torch.device,
+    iters: int = 200,
+    warmup: int = 30,
+) -> Dict[str, float]:
+    """
+    Measures latency of `fn()` in milliseconds.
+    - `fn` should run the exact work you want to time (e.g., model forward + postprocess)
+    - For CUDA uses torch.cuda.Event for accurate timing.
+    Returns avg/p50/p90/p99 in ms (per-call).
+    """
+    # warmup
+    for _ in range(max(0, warmup)):
+        _ = fn()
+
+    times_ms = []
+
+    if device.type == "cuda":
+        starter = torch.cuda.Event(enable_timing=True)
+        ender = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+
+        for _ in range(max(1, iters)):
+            starter.record()
+            _ = fn()
+            ender.record()
+            torch.cuda.synchronize()
+            times_ms.append(starter.elapsed_time(ender))
+    else:
+        for _ in range(max(1, iters)):
+            t0 = time.perf_counter()
+            _ = fn()
+            t1 = time.perf_counter()
+            times_ms.append((t1 - t0) * 1000.0)
+
+    arr = np.asarray(times_ms, dtype=np.float64)
+    return {
+        "avg_ms": float(arr.mean()),
+        "p50_ms": float(np.percentile(arr, 50)),
+        "p90_ms": float(np.percentile(arr, 90)),
+        "p99_ms": float(np.percentile(arr, 99)),
+        "iters": float(len(arr)),
+    }
