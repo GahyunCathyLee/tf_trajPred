@@ -1,0 +1,7 @@
+ckpts/
+
+*.npz
+*.pt
+*.csv
+
+__pycache__/

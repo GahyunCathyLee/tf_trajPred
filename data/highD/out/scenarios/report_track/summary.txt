@@ -1,0 +1,18 @@
+Track-level Scenario Report
+- input: /home/gahyun/tf_trajPred/data/highD/out/scenarios/highd_window_labels.csv
+- n_tracks: 109,287
+- has_class: False
+
+[Track flags]
+- has_merging: 0 tracks (0.000)
+- has_diverging: 0 tracks (0.000)
+- has_cut_in: 7070 tracks (0.065)
+- has_simple_lc: 5919 tracks (0.054)
+- has_any_lane_change: 12751 tracks (0.117)
+
+[Outputs]
+- event_presence_by_class.csv
+- track_event_presence_counts.csv
+- track_state_presence_counts.csv
+- track_summary.csv
+- summary.txt
