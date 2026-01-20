@@ -13,10 +13,7 @@ from typing import Dict
 from tqdm import tqdm
 
 from src.metrics import (
-    ade,
-    fde,
-    ade_per_sample,
-    fde_per_sample,
+    ade, fde, ade_per_sample, fde_per_sample
 )
 from src.losses import trajectory_loss, multimodal_loss
 from src.utils import _to_int
@@ -35,32 +32,95 @@ def evaluate(
     w_traj: float,
     w_fde: float,
     w_cls: float,
+    data_hz: float,
     labels_lut=None,
     save_event_path: Path | None = None,
     save_state_path: Path | None = None,
     epoch: int | None = None,
 ) -> Dict[str, float]:
+    """
+    Returns (overall):
+      loss, ade, fde, vel, acc, jerk, n_samples,
+      matched, matched_ratio   (when labels_lut provided; otherwise matched=-1)
+
+    Also optionally appends per-epoch stratified CSV:
+      - save_event_path: per-event label metrics
+      - save_state_path: per-state label metrics
+
+    Kinematic metrics:
+      vel/acc/jerk are "ADE-style" time-averaged errors over the future horizon (no FDE).
+    """
     model.eval()
 
-    # sample-weighted overall accumulators
+    if data_hz <= 0:
+        raise ValueError(f"data_hz must be > 0, got {data_hz}")
+
+    # -------------------------
+    # Overall accumulators (sample-weighted)
+    # -------------------------
     sum_loss = 0.0
     sum_ade = 0.0
     sum_fde = 0.0
+    sum_vel = 0.0
+    sum_acc = 0.0
+    sum_jerk = 0.0
     n_samples = 0
 
-    # stratified accumulators: label -> [sum_ade, sum_fde, count]
-    ev_stats = defaultdict(lambda: [0.0, 0.0, 0])
-    st_stats = defaultdict(lambda: [0.0, 0.0, 0])
+    # -------------------------
+    # Stratified accumulators
+    # label -> [sum_ade, sum_fde, sum_vel, sum_acc, sum_jerk, count]
+    # -------------------------
+    ev_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0])
+    st_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0])
     n_matched = 0
-    n_total_samples = 0  # denominator for matched_ratio (count of evaluated samples)
+    n_total_samples = 0  # denominator for matched_ratio
+
+    # dt = 1/hz, and for finite-diff we use hz multiplier
+    hz = float(data_hz)
+
+    # -------------------------
+    # helper: kinematic per-sample ADE-style error
+    # -------------------------
+    def _kin_err_per_sample(pred_kin: torch.Tensor, gt_kin: torch.Tensor) -> torch.Tensor:
+        """
+        pred_kin, gt_kin: (B, Tf, 2)
+        returns: (B,) time-averaged L2 error over Tf
+        """
+        # (B, Tf)
+        e = torch.norm(pred_kin - gt_kin, dim=-1)
+        return e.mean(dim=1)
+
+    def _finite_diff(x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, Tf, 2)
+        returns dx/dt approx on same length Tf:
+          v[t] = (x[t] - x[t-1]) * hz  for t>=1
+          v[0] = v[1] (or 0 if Tf==1)
+        """
+        B, Tf, D = x.shape
+        if Tf <= 1:
+            return torch.zeros_like(x)
+
+        dx = x[:, 1:, :] - x[:, :-1, :]          # (B, Tf-1, 2)
+        v = dx * hz                               # per-second
+        v0 = v[:, :1, :]                          # (B,1,2)
+        out = torch.cat([v0, v], dim=1)           # (B,Tf,2)
+        return out
 
     pbar = tqdm(loader, desc="val", dynamic_ncols=True, leave=False)
     for batch in pbar:
         x_ego = batch["x_ego"].to(device, non_blocking=True)
         x_nb = batch["x_nb"].to(device, non_blocking=True)
         nb_mask = batch["nb_mask"].to(device, non_blocking=True)
-        y_abs = batch["y"].to(device, non_blocking=True)
+
+        y_abs = batch["y"].to(device, non_blocking=True)          # (B,Tf,2)
         x_last_abs = batch["x_last_abs"].to(device, non_blocking=True)
+
+        # ---- GT kinematics must exist (as you intended) ----
+        if "y_vel" not in batch or "y_acc" not in batch:
+            raise KeyError("Batch missing 'y_vel' or 'y_acc'. PtWindowDataset must provide them.")
+        y_vel = batch["y_vel"].to(device, non_blocking=True)      # (B,Tf,2)
+        y_acc = batch["y_acc"].to(device, non_blocking=True)      # (B,Tf,2)
 
         with autocast(device_type="cuda", enabled=use_amp):
             out = model(x_ego, x_nb, nb_mask)
@@ -69,7 +129,9 @@ def evaluate(
             else:
                 pred, scores = out, None
 
+            # -------- predict trajectories --------
             if pred.dim() == 4:
+                # multimodal: pred (B,K,Tf,2)
                 loss, best_idx = multimodal_loss(
                     pred=pred,
                     y_abs=y_abs,
@@ -86,6 +148,7 @@ def evaluate(
                     pred_abs_all = pred
                 pred_abs = pred_abs_all[torch.arange(pred.shape[0], device=pred.device), best_idx]
             else:
+                # single-mode: pred (B,Tf,2) or delta
                 loss = trajectory_loss(
                     pred=pred,
                     y_abs=y_abs,
@@ -97,37 +160,54 @@ def evaluate(
                 pred_abs = delta_to_abs(pred, x_last_abs) if predict_delta else pred
 
         B = int(pred_abs.shape[0])
-
-        # ---- overall: sample-wise ADE/FDE (no duplicate computation) ----
-        ade_s_t = ade_per_sample(pred_abs, y_abs)  # [B]
-        fde_s_t = fde_per_sample(pred_abs, y_abs)  # [B]
-
-        sum_ade += float(ade_s_t.sum().item())
-        sum_fde += float(fde_s_t.sum().item())
-
-        # loss is assumed to be batch-mean; make it sample-weighted
-        sum_loss += float(loss.item()) * B
-
         n_samples += B
 
-        # denominator for matched ratio: count all evaluated samples when labels are enabled
+        # loss is assumed batch-mean -> make sample-weighted
+        sum_loss += float(loss.item()) * B
+
+        # ---- displacement metrics (per-sample to avoid redundant compute) ----
+        ade_s = ade_per_sample(pred_abs, y_abs)  # (B,)
+        fde_s = fde_per_sample(pred_abs, y_abs)  # (B,)
+        sum_ade += float(ade_s.sum().item())
+        sum_fde += float(fde_s.sum().item())
+
+        # ---- predicted kinematics from pred_abs ----
+        pred_vel = _finite_diff(pred_abs)          # (B,Tf,2)
+        pred_acc = _finite_diff(pred_vel)          # (B,Tf,2)
+        pred_jerk = _finite_diff(pred_acc)         # (B,Tf,2)
+
+        # ---- GT jerk from GT acc ----
+        gt_jerk = _finite_diff(y_acc)
+
+        # ---- kinematic ADE-style errors (per-sample) ----
+        vel_s = _kin_err_per_sample(pred_vel, y_vel)       # (B,)
+        acc_s = _kin_err_per_sample(pred_acc, y_acc)       # (B,)
+        jerk_s = _kin_err_per_sample(pred_jerk, gt_jerk)   # (B,)
+
+        sum_vel += float(vel_s.sum().item())
+        sum_acc += float(acc_s.sum().item())
+        sum_jerk += float(jerk_s.sum().item())
+
+        # denominator for matched ratio
         if labels_lut is not None:
             n_total_samples += B
 
         # ---- stratified: only if meta exists ----
         if labels_lut is not None and ("meta" in batch):
-            ade_s = ade_s_t.detach().cpu().numpy()
-            fde_s = fde_s_t.detach().cpu().numpy()
             metas = batch["meta"]
-
-            # metas length should match B; if not, be safe
             Bb = min(len(metas), B)
+
+            ade_np = ade_s.detach().cpu().numpy()
+            fde_np = fde_s.detach().cpu().numpy()
+            vel_np = vel_s.detach().cpu().numpy()
+            acc_np = acc_s.detach().cpu().numpy()
+            jerk_np = jerk_s.detach().cpu().numpy()
 
             for i in range(Bb):
                 m = metas[i] or {}
                 rid = m.get("recordingId", None)
                 tid = m.get("trackId", None)
-                t0  = m.get("t0_frame", None)
+                t0 = m.get("t0_frame", None)
                 if rid is None or tid is None or t0 is None:
                     continue
 
@@ -140,71 +220,86 @@ def evaluate(
                 ev = lab.get("event_label", None) or "unknown"
                 st = lab.get("state_label", None) or "unknown"
 
-                ev_stats[ev][0] += float(ade_s[i])
-                ev_stats[ev][1] += float(fde_s[i])
-                ev_stats[ev][2] += 1
+                # event accum
+                ev_stats[ev][0] += float(ade_np[i])
+                ev_stats[ev][1] += float(fde_np[i])
+                ev_stats[ev][2] += float(vel_np[i])
+                ev_stats[ev][3] += float(acc_np[i])
+                ev_stats[ev][4] += float(jerk_np[i])
+                ev_stats[ev][5] += 1
 
-                st_stats[st][0] += float(ade_s[i])
-                st_stats[st][1] += float(fde_s[i])
-                st_stats[st][2] += 1
+                # state accum
+                st_stats[st][0] += float(ade_np[i])
+                st_stats[st][1] += float(fde_np[i])
+                st_stats[st][2] += float(vel_np[i])
+                st_stats[st][3] += float(acc_np[i])
+                st_stats[st][4] += float(jerk_np[i])
+                st_stats[st][5] += 1
 
         pbar.set_postfix({
             "loss": f"{loss.item():.4f}",
-            "ADE": f"{(ade_s_t.mean().item()):.3f}",
-            "FDE": f"{(fde_s_t.mean().item()):.3f}",
+            "ADE": f"{ade_s.mean().item():.3f}",
+            "FDE": f"{fde_s.mean().item():.3f}",
+            "vel": f"{vel_s.mean().item():.3f}",
+            "acc": f"{acc_s.mean().item():.3f}",
+            "jerk": f"{jerk_s.mean().item():.3f}",
         })
 
-    # ---- helpers ----
-    def _weighted_mean(stats_dict):
-        tot = sum(v[2] for v in stats_dict.values())
-        if tot <= 0:
-            return (np.nan, np.nan, 0)
-        sa = sum(v[0] for v in stats_dict.values())
-        sf = sum(v[1] for v in stats_dict.values())
-        return (sa / tot, sf / tot, tot)
-
-    def _per_label(stats_dict, label):
-        sa, sf, c = stats_dict.get(label, [0.0, 0.0, 0])
-        if c <= 0:
-            return (0, np.nan, np.nan)
-        return (int(c), float(sa / c), float(sf / c))
-
-    # ---- overall sample-weighted means ----
+    # -------------------------
+    # Overall means
+    # -------------------------
     overall_loss = sum_loss / max(1, n_samples)
-    overall_ade  = sum_ade  / max(1, n_samples)
-    overall_fde  = sum_fde  / max(1, n_samples)
+    overall_ade = sum_ade / max(1, n_samples)
+    overall_fde = sum_fde / max(1, n_samples)
+    overall_vel = sum_vel / max(1, n_samples)
+    overall_acc = sum_acc / max(1, n_samples)
+    overall_jerk = sum_jerk / max(1, n_samples)
 
-    # ---- stratified summary for results.csv ----
-    event_wade, event_wfde = (np.nan, np.nan)
-    state_wade, state_wfde = (np.nan, np.nan)
-    matched_ratio = np.nan
-
+    matched_ratio = float("nan")
     if labels_lut is not None and n_total_samples > 0:
         matched_ratio = float(n_matched / max(1, n_total_samples))
-        event_wade, event_wfde, _ = _weighted_mean(ev_stats)
-        state_wade, state_wfde, _ = _weighted_mean(st_stats)
 
-    # ---- save per-label CSV rows (event/state) ----
-    if labels_lut is not None and n_total_samples > 0:
+    # -------------------------
+    # Save per-label CSV (event/state)
+    # - weighted_* 제거
+    # - label별 평균만 저장
+    # -------------------------
+    def _per_label_row(stats_dict, label: str):
+        sa, sf, sv, sac, sj, c = stats_dict.get(label, [0.0, 0.0, 0.0, 0.0, 0.0, 0])
+        if c <= 0:
+            return (0, np.nan, np.nan, np.nan, np.nan, np.nan)
+        c = int(c)
+        return (c, float(sa / c), float(sf / c), float(sv / c), float(sac / c), float(sj / c))
+
+    if labels_lut is not None and n_total_samples > 0 and epoch is not None:
         coverage = {
+            "epoch": int(epoch),
             "matched": int(n_matched),
             "total": int(n_total_samples),
             "matched_ratio": float(n_matched / max(1, n_total_samples)),
         }
 
+        # 원하는 label 리스트는 네 프로젝트 정의와 맞추면 됨
+        EVENT_LABELS = [
+            "none", "cut_in", "merging", "diverging",
+            "simple_lane_change", "lane_change_other", "unknown"
+        ]
+        STATE_LABELS = [
+            "free_flow", "dense", "car_following",
+            "ramp_driving", "other", "unknown"
+        ]
+
         if save_event_path is not None:
             save_event_path.parent.mkdir(parents=True, exist_ok=True)
-            EVENT_LABELS = ["none", "cut_in", "merging", "diverging",
-                            "simple_lane_change", "lane_change_other", "unknown"]
-
-            wade, wfde, _ = _weighted_mean(ev_stats)
             row = dict(coverage)
-
             for lab in EVENT_LABELS:
-                c, a, f = _per_label(ev_stats, lab)
+                c, a, f, v, ac, j = _per_label_row(ev_stats, lab)
                 row[f"{lab}_count"] = c
                 row[f"{lab}_ADE"] = a
                 row[f"{lab}_FDE"] = f
+                row[f"{lab}_vel"] = v
+                row[f"{lab}_acc"] = ac
+                row[f"{lab}_jerk"] = j
 
             df_row = pd.DataFrame([row])
             header = not save_event_path.exists()
@@ -212,17 +307,15 @@ def evaluate(
 
         if save_state_path is not None:
             save_state_path.parent.mkdir(parents=True, exist_ok=True)
-            STATE_LABELS = ["free_flow", "dense", "car_following",
-                            "ramp_driving", "other", "unknown"]
-
-            wade, wfde, _ = _weighted_mean(st_stats)
             row = dict(coverage)
-
             for lab in STATE_LABELS:
-                c, a, f = _per_label(st_stats, lab)
+                c, a, f, v, ac, j = _per_label_row(st_stats, lab)
                 row[f"{lab}_count"] = c
                 row[f"{lab}_ADE"] = a
                 row[f"{lab}_FDE"] = f
+                row[f"{lab}_vel"] = v
+                row[f"{lab}_acc"] = ac
+                row[f"{lab}_jerk"] = j
 
             df_row = pd.DataFrame([row])
             header = not save_state_path.exists()
@@ -232,11 +325,13 @@ def evaluate(
         "loss": float(overall_loss),
         "ade": float(overall_ade),
         "fde": float(overall_fde),
-
+        "vel": float(overall_vel),
+        "acc": float(overall_acc),
+        "jerk": float(overall_jerk),
         "n_samples": int(n_samples),
 
         "matched": int(n_matched) if labels_lut is not None else -1,
-        "matched_ratio": float(matched_ratio) if np.isfinite(matched_ratio) else float("nan"),
+        "matched_ratio": float(matched_ratio),
     }
 
 

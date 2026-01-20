@@ -70,15 +70,12 @@ def log_eval_to_csv(
         "loss": _safe_float(metrics.get("loss")),
         "ade": _safe_float(metrics.get("ade")),
         "fde": _safe_float(metrics.get("fde")),
+        "vel": _safe_float(metrics.get("vel")),
+        "acc": _safe_float(metrics.get("acc")),
+        "jerk": _safe_float(metrics.get("jerk")),
 
         "matched_ratio": _safe_float(metrics.get("matched_ratio")),
     }
-
-    for k, v in metrics.items():
-        if k in row:
-            continue
-        if isinstance(k, str) and (k.endswith("_ADE") or k.endswith("_FDE")):
-            row[k] = _safe_float(v)
 
     df = pd.DataFrame([row])
     header = not csv_out.exists()

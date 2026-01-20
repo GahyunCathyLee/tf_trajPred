@@ -143,4 +143,3 @@ class PtWindowDataset(Dataset):
             out["meta"] = meta
 
         return out
-

@@ -195,6 +195,7 @@ def main():
     loss_cfg = cfg.get("loss", {})
     predict_delta = bool(cfg.get("model", {}).get("predict_delta", False))
     epoch_for_csv = args.epoch if args.epoch is not None else -1
+    data_hz = float(cfg.get("data", {}).get("hz", 0.0))
 
     metrics = evaluate(
         model=model,
@@ -205,6 +206,7 @@ def main():
         w_traj=float(loss_cfg.get("w_traj", 1.0)),
         w_fde=float(loss_cfg.get("w_fde", 1.0)),
         w_cls=float(loss_cfg.get("w_cls", 1.0)),
+        data_hz=data_hz,
         labels_lut=labels_lut,
         save_event_path=save_event_path,
         save_state_path=save_state_path,
@@ -233,8 +235,12 @@ def main():
         )
         print(f"[OK] appended: {csv_out}")
 
-    print(f"[RESULT] split=test loss={metrics['loss']:.6f} ADE={metrics['ade']:.6f} FDE={metrics['fde']:.6f}")
-
+    print(f"[RESULT] loss={metrics['loss']:.6f} ADE={metrics['ade']:.6f} FDE={metrics['fde']:.6f}")
+    print(  
+        f"[RESULT] VEL={metrics.get('vel', float('nan')):.6f} "
+        f"ACC={metrics.get('acc', float('nan')):.6f} "
+        f"JERK={metrics.get('jerk', float('nan')):.6f}"
+    )
 
 if __name__ == "__main__":
     main()
