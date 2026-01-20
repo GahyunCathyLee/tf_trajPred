@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
 from torch.amp import GradScaler
 
 import yaml
@@ -18,7 +18,7 @@ from src.datasets.pt_dataset import PtWindowDataset
 from src.datasets.collate import collate_batch
 from src.models.build import build_model, build_scheduler
 from src.engine import train_one_epoch, evaluate
-from src.scenarios import load_window_labels_csv
+from src.scenarios import load_window_labels_csv, build_sample_weights
 
 
 def main() -> None:
@@ -142,7 +142,7 @@ def main() -> None:
             data_dir=exid_pt_dir,
             split_txt=train_split,
             stats=stats,
-            return_meta=False,
+            return_meta=True,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             dataset_name="exid",
@@ -151,7 +151,7 @@ def main() -> None:
             data_dir=exid_pt_dir,
             split_txt=val_split,
             stats=stats,
-            return_meta=True,
+            return_meta=False,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             dataset_name="exid",
@@ -165,7 +165,7 @@ def main() -> None:
             data_dir=highd_pt_dir,
             split_txt=train_split,
             stats=stats,
-            return_meta=False,
+            return_meta=True,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             dataset_name="highd",
@@ -174,7 +174,7 @@ def main() -> None:
             data_dir=highd_pt_dir,
             split_txt=val_split,
             stats=stats,
-            return_meta=True,
+            return_meta=False,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             dataset_name="highd",
@@ -185,7 +185,7 @@ def main() -> None:
             data_dir=exid_pt_dir,
             split_txt=exid_splits_dir / "train.txt",
             stats=stats,
-            return_meta=False,
+            return_meta=True,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             dataset_name="exid",
@@ -194,7 +194,7 @@ def main() -> None:
             data_dir=highd_pt_dir,
             split_txt=highd_splits_dir / "train.txt",
             stats=stats,
-            return_meta=False,
+            return_meta=True,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             dataset_name="highd",
@@ -205,7 +205,7 @@ def main() -> None:
             data_dir=exid_pt_dir,
             split_txt=exid_splits_dir / "val.txt",
             stats=stats,
-            return_meta=True,
+            return_meta=False,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             dataset_name="exid",
@@ -214,33 +214,12 @@ def main() -> None:
             data_dir=highd_pt_dir,
             split_txt=highd_splits_dir / "val.txt",
             stats=stats,
-            return_meta=True,
+            return_meta=False,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             dataset_name="highd",
         )
         val_ds = ConcatDataset([exid_val, highd_val])
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-        drop_last=True,
-        collate_fn=collate_batch,
-        persistent_workers=(num_workers > 0),
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-        drop_last=False,
-        collate_fn=collate_batch,
-        persistent_workers=(num_workers > 0),
-    )
 
     # -------------------------
     # scenario labels
@@ -257,6 +236,74 @@ def main() -> None:
             if "highd" in labels_cfg:
                 merged.update(load_window_labels_csv(Path(labels_cfg["highd"])))
             labels_lut = merged
+
+    # ---- scenario-aware sampling config ----
+    sam_cfg = cfg.get("data", {}).get("scenario_sampling", None)
+    use_scenario_sampling = bool(sam_cfg and labels_lut is not None)
+
+    if use_scenario_sampling:
+        mode_key = str(sam_cfg.get("mode", "event")).lower()   # "event" or "state"
+        alpha = float(sam_cfg.get("alpha", 0.5))              # 0.5 recommended start
+        unknown_w = float(sam_cfg.get("unknown_weight", 0.0))
+        clip_max = sam_cfg.get("clip_max", None)
+        clip_max = float(clip_max) if clip_max is not None else None
+
+        # build per-index weights (requires train_ds return_meta=True)
+        weights = build_sample_weights(
+            train_ds, labels_lut,
+            mode=("event" if mode_key == "event" else "state"),
+            alpha=alpha,
+            unknown_weight=unknown_w,
+            clip_max=clip_max,
+            log = True
+        )
+
+        sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(train_ds),     # epoch당 샘플 수
+            replacement=True               # 중요: True
+        )
+
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            sampler=sampler,
+            shuffle=False,                # sampler 사용 시 shuffle 금지
+            num_workers=num_workers,
+            pin_memory=(device.type == "cuda"),
+            drop_last=True,
+            prefetch_factor=2,
+            collate_fn=collate_batch,
+            persistent_workers=(num_workers > 0),
+        )
+        print(f"[INFO] Scenario-aware sampling enabled: mode={mode_key} alpha={alpha}")
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=(device.type == "cuda"),
+            drop_last=True,
+            collate_fn=collate_batch,
+            prefetch_factor=2,
+            persistent_workers=(num_workers > 0),
+        )
+        if sam_cfg and labels_lut is None:
+            print("[WARN] scenario_sampling set but labels_lut not loaded -> disabled")
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=(device.type == "cuda"),
+        drop_last=False,
+        prefetch_factor=2,
+        collate_fn=collate_batch,
+        persistent_workers=(num_workers > 0),
+    )
+
 
     # -------------------------
     # model / optim / sched
@@ -326,6 +373,8 @@ def main() -> None:
         )
         global_step = int(tr["global_step_end"])
 
+        do_strat = bool(cfg.get("train", {}).get("stratified_eval", False))
+
         va = evaluate(
             model=model,
             loader=val_loader,
@@ -335,10 +384,11 @@ def main() -> None:
             w_traj=w_traj,
             w_fde=w_fde,
             w_cls=w_cls,
-            labels_lut=labels_lut,
-            save_event_path=event_csv if labels_lut is not None else None,
-            save_state_path=state_csv if labels_lut is not None else None,
-            epoch=ep if labels_lut is not None else None,
+            labels_lut=(labels_lut if do_strat else None),
+            save_event_path=(event_csv if (do_strat and labels_lut is not None) else None),
+            save_state_path=(state_csv if (do_strat and labels_lut is not None) else None),
+            epoch=(ep if (do_strat and labels_lut is not None) else None),
+            data_hz = float(cfg.get("data", {}).get("hz", 0.0))
         )
 
         print(

@@ -25,6 +25,12 @@ data:
     exid: data/exiD/data_pt/exid_T2_Tf5_hz3/window_labels.csv
     highd: data/highD/data_pt/highd_T2_Tf5_hz3/window_labels.csv
 
+  scenario_sampling:
+    mode: event        # event | state
+    alpha: 0.5         # 1.0 strong, 0.5 mild
+    unknown_weight: 0.0
+    clip_max: null
+
 
 # =========================
 # FEATURES

@@ -16,6 +16,7 @@ class PtWindowDataset(Dataset):
       x_hist (N,T,De), y_fut (N,Tf,2), nb_hist (N,T,K,Dn), nb_mask (N,T,K)
 
     Optional:
+      y_fut_vel (N,Tf,2), y_fut_acc (N,Tf,2)
       ego_static (N,Ds_ego) -> repeated over T and concatenated to x_hist
       nb_static  (N,K,Ds_nb) or (N,T,K,Ds_nb) -> repeated over T and concatenated to nb_hist
       meta fields (recordingId, trackId, t0_frame, ...)
@@ -37,6 +38,17 @@ class PtWindowDataset(Dataset):
         self.use_ego_static = use_ego_static
         self.use_nb_static = use_nb_static
         self.dataset_name = dataset_name
+
+        # ---- cache stats as float32 ONCE (important for speed) ----
+        if self.stats is not None:
+            # keep on CPU; DataLoader workers will use these cached tensors
+            self._ego_mean = self.stats["ego_mean"].to(torch.float32)
+            self._ego_std = self.stats["ego_std"].to(torch.float32)
+            self._nb_mean = self.stats["nb_mean"].to(torch.float32)
+            self._nb_std = self.stats["nb_std"].to(torch.float32)
+        else:
+            self._ego_mean = self._ego_std = None
+            self._nb_mean = self._nb_std = None
 
         names = [ln.strip() for ln in split_txt.read_text().splitlines() if ln.strip()]
         self.files = [self.data_dir / n for n in names]
@@ -74,26 +86,53 @@ class PtWindowDataset(Dataset):
                 lo = mid + 1
         raise IndexError(idx)
 
+    def _get_meta_from_rec(self, d: Dict[str, torch.Tensor], local_i: int) -> Dict[str, Any]:
+        meta: Dict[str, Any] = {}
+        if self.dataset_name is not None:
+            meta["dataset"] = self.dataset_name
+        for k in ["recordingId", "trackId", "t0_frame"]:
+            if k in d:
+                meta[k] = d[k][local_i]
+        return meta
+
+    def get_meta(self, idx: int) -> Dict[str, Any]:
+        """
+        Meta-only fast path: returns {"recordingId","trackId","t0_frame",("dataset")} without loading tensors.
+        Useful for scenario-aware sampling weight construction.
+        """
+        rec_i, local_i = self._locate(idx)
+        d = self.recs[rec_i]
+        return self._get_meta_from_rec(d, local_i)
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         rec_i, local_i = self._locate(idx)
         d = self.recs[rec_i]
 
-        x_hist = d["x_hist"][local_i].to(torch.float32)     # (T,De)
-        y_fut = d["y_fut"][local_i].to(torch.float32)       # (Tf,2)
-        y_fut_vel = d["y_fut_vel"][local_i].to(torch.float32) if "y_fut_vel" in d else None
-        y_fut_acc = d["y_fut_acc"][local_i].to(torch.float32) if "y_fut_acc" in d else None
-        nb_hist = d["nb_hist"][local_i].to(torch.float32)   # (T,K,Dn)
-        nb_mask = d["nb_mask"][local_i].bool()              # (T,K)
+        # x_hist: (T,De) float32
+        # y_fut:  (Tf,2) float32
+        # nb_hist:(T,K,Dn) float32
+        # nb_mask:(T,K) bool
+        x_hist = d["x_hist"][local_i]
+        y_fut = d["y_fut"][local_i]
+        nb_hist = d["nb_hist"][local_i]
+        nb_mask = d["nb_mask"][local_i]
 
-        x_last_abs = x_hist[-1, 0:2].clone()
+        # Optional targets
+        y_fut_vel = d["y_fut_vel"][local_i] if "y_fut_vel" in d else None
+        y_fut_acc = d["y_fut_acc"][local_i] if "y_fut_acc" in d else None
+
+        # Use precomputed x_last_abs if available; fallback otherwise
+        if "x_last_abs" in d:
+            x_last_abs = d["x_last_abs"][local_i]
+        else:
+            x_last_abs = x_hist[-1, 0:2].clone()
 
         if self.use_ego_static and ("ego_static" in d):
-            ego_static = d["ego_static"][local_i].to(torch.float32).view(1, -1)
+            ego_static = d["ego_static"][local_i].view(1, -1)
             x_hist = torch.cat([x_hist, ego_static.expand(x_hist.shape[0], -1)], dim=-1)
 
         if self.use_nb_static and ("nb_static" in d):
-            nb_static = d["nb_static"][local_i].to(torch.float32)
-
+            nb_static = d["nb_static"][local_i]
             if nb_static.dim() == 2:
                 nb_static = nb_static.unsqueeze(0).expand(nb_hist.shape[0], -1, -1)
             elif nb_static.dim() == 3:
@@ -105,18 +144,19 @@ class PtWindowDataset(Dataset):
                     raise RuntimeError(f"Unexpected nb_static 4D shape: {tuple(nb_static.shape)}")
             else:
                 raise RuntimeError(f"Unexpected nb_static shape: {tuple(nb_static.shape)}")
-
             nb_hist = torch.cat([nb_hist, nb_static], dim=-1)
 
+        # --- normalize with cached stats ---
         if self.stats is not None:
-            ego_mean = self.stats["ego_mean"].to(torch.float32)
-            ego_std = self.stats["ego_std"].to(torch.float32)
+            ego_mean = self._ego_mean
+            ego_std = self._ego_std
+            nb_mean = self._nb_mean
+            nb_std = self._nb_std
+
             if ego_mean.numel() != x_hist.shape[-1]:
                 raise RuntimeError(f"[STATS MISMATCH] ego {ego_mean.numel()} vs {x_hist.shape[-1]}")
             x_hist = (x_hist - ego_mean) / ego_std.clamp_min(1e-6)
 
-            nb_mean = self.stats["nb_mean"].to(torch.float32)
-            nb_std = self.stats["nb_std"].to(torch.float32)
             if nb_mean.numel() != nb_hist.shape[-1]:
                 raise RuntimeError(f"[STATS MISMATCH] nb {nb_mean.numel()} vs {nb_hist.shape[-1]}")
             nb_hist = (nb_hist - nb_mean) / nb_std.clamp_min(1e-6)
@@ -134,12 +174,6 @@ class PtWindowDataset(Dataset):
             out["y_acc"] = y_fut_acc
 
         if self.return_meta:
-            meta: Dict[str, Any] = {}
-            if self.dataset_name is not None:
-                meta["dataset"] = self.dataset_name
-            for k in ["recordingId", "trackId", "t0_frame"]:
-                if k in d:
-                    meta[k] = d[k][local_i]
-            out["meta"] = meta
+            out["meta"] = self._get_meta_from_rec(d, local_i)
 
         return out
