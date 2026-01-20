@@ -420,41 +420,9 @@ def train_one_epoch(
     total_fde_t  = torch.zeros((), device=device)
     n = 0
 
-    # -------------------------
-    # Timing accumulators (seconds)
-    # -------------------------
-    data_wait_sum = 0.0
-    step_sum = 0.0
-    # moving averages to see periodic swings
-    data_wait_ema = None
-    step_ema = None
-    ema_beta = 0.9
+    pbar = tqdm(loader, desc=f"train ep{epoch}", dynamic_ncols=True, leave=False)
 
-    # IMPORTANT: use an explicit iterator so we can time "getting the batch"
-    it_loader = iter(loader)
-
-    # tqdm over known length (so tqdm doesn't iterate loader directly)
-    pbar = tqdm(range(len(loader)), desc=f"train ep{epoch}", dynamic_ncols=True, leave=False)
-
-    for it in pbar:
-        # -------------------------
-        # (A) measure dataloader wait
-        # -------------------------
-        t0 = time.perf_counter()
-        batch = next(it_loader)  # <-- includes waiting for workers/prefetch/IO
-        t1 = time.perf_counter()
-        t_data = t1 - t0
-
-        # -------------------------
-        # (B) training step time
-        # -------------------------
-        # If you want "GPU-accurate" timings, uncomment synchronize calls.
-        # NOTE: synchronize adds overhead; use only for diagnosis.
-        # if device.type == "cuda":
-        #     torch.cuda.synchronize()
-
-        t2 = time.perf_counter()
-
+    for it, batch in enumerate(pbar):
         x_ego = batch["x_ego"].to(device, non_blocking=True)
         x_nb  = batch["x_nb"].to(device, non_blocking=True)
         nb_mask = batch["nb_mask"].to(device, non_blocking=True)
@@ -495,6 +463,7 @@ def train_one_epoch(
         with torch.no_grad():
             pred_abs_all = pred
             pred_abs = pred_abs_all[torch.arange(pred.shape[0], device=pred.device), best_idx]
+
             a = ade(pred_abs, y_abs)
             f = fde(pred_abs, y_abs)
 
@@ -504,32 +473,9 @@ def train_one_epoch(
         n += 1
         global_step += 1
 
-        # if device.type == "cuda":
-        #     torch.cuda.synchronize()
-
-        t3 = time.perf_counter()
-        t_step = t3 - t2
-
-        # -------------------------
-        # (C) update stats
-        # -------------------------
-        data_wait_sum += t_data
-        step_sum += t_step
-
-        if data_wait_ema is None:
-            data_wait_ema = t_data
-            step_ema = t_step
-        else:
-            data_wait_ema = ema_beta * data_wait_ema + (1 - ema_beta) * t_data
-            step_ema = ema_beta * step_ema + (1 - ema_beta) * t_step
-
-        # -------------------------
-        # (D) log occasionally (avoid extra sync)
-        # -------------------------
         if it % log_every == 0:
             lr = optimizer.param_groups[0]["lr"]
 
-            # stability checks (same as yours)
             if _any_nonfinite(x_ego) or _any_nonfinite(x_nb) or _any_nonfinite(y_abs) or _any_nonfinite(x_last_abs):
                 print(f"[BAD INPUT] ep={epoch} it={it}")
                 print("  x_ego:", _finite_stats(x_ego))
@@ -546,30 +492,16 @@ def train_one_epoch(
                 print(f"[BAD PARAM] ep={epoch} it={it} params became non-finite AFTER step()")
                 raise RuntimeError("Params exploded to NaN/Inf")
 
-            # Report both instantaneous and EMA times (ms) + ratio
-            # Note: loss/a/f item() introduces sync; but only at log_every.
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}",
                 ADE=f"{a.item():.3f}",
                 FDE=f"{f.item():.3f}",
                 lr=f"{lr:.1e}",
-                data_ms=f"{t_data*1000:.1f}",
-                step_ms=f"{t_step*1000:.1f}",
-                data_ema_ms=f"{data_wait_ema*1000:.1f}",
-                step_ema_ms=f"{step_ema*1000:.1f}",
-                data_frac=f"{t_data/(t_data+t_step+1e-12):.2f}",
             )
-
-    # epoch-level averages (seconds)
-    avg_data = data_wait_sum / max(1, len(loader))
-    avg_step = step_sum / max(1, len(loader))
 
     return {
         "loss": float((total_loss_t / max(1, n)).item()),
         "ade":  float((total_ade_t  / max(1, n)).item()),
         "fde":  float((total_fde_t  / max(1, n)).item()),
         "global_step_end": global_step,
-        "avg_data_wait_s": avg_data,
-        "avg_step_s": avg_step,
-        "avg_data_frac": float(avg_data / (avg_data + avg_step + 1e-12)),
     }
