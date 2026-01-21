@@ -70,13 +70,24 @@ class PtWindowDatasetNoNorm(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         rec_i, local_i = self._locate(idx)
         d = self.recs[rec_i]
+        
+        file_path = self.files[rec_i]
 
-        x = d["x_hist"][local_i].to(torch.float32)       # (T,De)
-        nb = d["nb_hist"][local_i].to(torch.float32)     # (T,K,Dn)
-        mask = d["nb_mask"][local_i].bool()              # (T,K)
+        x = d["x_hist"][local_i].to(torch.float32)
+        nb = d["nb_hist"][local_i].to(torch.float32)
+        mask = d["nb_mask"][local_i].bool()
+
+        if not torch.isfinite(x).all():
+            print(f"[BAD DATA] NaN/Inf found in x_hist! File: {file_path}, Index: {local_i}")
+            
+        if not torch.isfinite(nb[mask]).all():
+            print(f"[BAD DATA] NaN/Inf found in nb_hist! File: {file_path}, Index: {local_i}")
+        # ------------------------
 
         if self.use_ego_static and ("ego_static" in d):
-            es = d["ego_static"][local_i].to(torch.float32).view(1, -1)  # (1,Ds)
+            es = d["ego_static"][local_i].to(torch.float32).view(1, -1)
+            if not torch.isfinite(es).all():
+                print(f"[BAD DATA] NaN/Inf in ego_static! File: {file_path}")
             x = torch.cat([x, es.expand(x.shape[0], -1)], dim=-1)
 
         if self.use_nb_static and ("nb_static" in d):
@@ -247,6 +258,27 @@ def main() -> None:
 
     ego_std = np.sqrt(np.maximum(ego_var, 1e-12)).astype(np.float32)
     nb_std = np.sqrt(np.maximum(nb_var, 1e-12)).astype(np.float32)
+
+    print("\n[INSPECTION] Checking for dangerous low-variance features...")
+    
+    threshold = 1e-3 
+    
+    low_std_ego_indices = np.where(ego_std < threshold)[0]
+    if len(low_std_ego_indices) > 0:
+        print(f"⚠️ WARNING: Ego features with extremely low std (< {threshold}):")
+        for idx in low_std_ego_indices:
+            print(f"  - Dim {idx}: std={ego_std[idx]:.6f}, mean={ego_mean[idx]:.6f}")
+            
+    low_std_nb_indices = np.where(nb_std < threshold)[0]
+    if len(low_std_nb_indices) > 0:
+        print(f"⚠️ WARNING: Neighbor features with extremely low std (< {threshold}):")
+        for idx in low_std_nb_indices:
+            print(f"  - Dim {idx}: std={nb_std[idx]:.6f}, mean={nb_mean[idx]:.6f}")
+
+    if len(low_std_ego_indices) == 0 and len(low_std_nb_indices) == 0:
+        print("✅ All features have safe variance levels.")
+    else:
+        print("💡 SUGGESTION: Increase clamp_min in pt_dataset.py or remove these features.")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

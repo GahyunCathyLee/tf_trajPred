@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-exiD tracks.csv -> NPZ preprocessing for Transformer trajectory prediction (ego + 8 relation slots).
+exiD tracks.csv -> NPZ preprocessing with Adjacency Filtering.
 
+Key Features:
+1. Filters neighbors to include ONLY those in physically adjacent lanelets 
+   (using lanelet_adj_allmaps.pkl).
+2. **Corrected Logic**: 'leadId' and 'rearId' are always kept. Only side neighbors
+   are filtered based on adjacency.
+3. Optimized for speed (minimized pandas apply/loops).
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 
 import numpy as np
 import pandas as pd
-
-import re
-
+import pickle
 
 # =========================
 # filtering / clipping knobs
@@ -23,20 +27,20 @@ LANEWIDTH_DROP_TH = 3.0   # laneWidth < 3.0 -> drop window (history)
 LEAD_TTC_CAP = 90.0       # seconds
 LEAD_THW_CAP = 20.0       # seconds
 
-
+# Index 0, 1 are Same Lane (Always Keep)
+# Index 2~7 are Side Lanes (Check Adjacency)
 NEIGHBOR_COLS_8 = [
-    "leadId",
-    "rearId",
-    "leftLeadId",
-    "leftAlongsideId",
-    "leftRearId",
-    "rightLeadId",
-    "rightAlongsideId",
-    "rightRearId",
+    "leadId",           # 0
+    "rearId",           # 1
+    "leftLeadId",       # 2
+    "leftAlongsideId",  # 3
+    "leftRearId",       # 4
+    "rightLeadId",      # 5
+    "rightAlongsideId", # 6
+    "rightRearId",      # 7
 ]
 
 # Vocabulary for class one-hot.
-# Anything not in this list is mapped to "other".
 CLASS_VOCAB = [
     "car",
     "truck",
@@ -67,42 +71,6 @@ def _safe_float(a: np.ndarray, default: float = 0.0) -> np.ndarray:
     return a
 
 
-def _normalize_ramp_type_series(s: pd.Series) -> np.ndarray:
-    """
-    Map ramp_type string -> int code:
-      0 none
-      1 onramp
-      2 offramp
-      3 unknown
-    """
-    x = s.fillna("").astype(str).str.strip().str.lower()
-    x = x.replace(
-        {
-            "on_ramp": "onramp",
-            "on-ramp": "onramp",
-            "off_ramp": "offramp",
-            "off-ramp": "offramp",
-            "nan": "",
-            "null": "",
-        }
-    )
-
-    out = np.full(len(x), 3, dtype=np.int8)  # unknown default
-    out[x == "none"] = 0
-    out[x == "onramp"] = 1
-    out[x == "offramp"] = 2
-    # empty string stays unknown
-    return out
-
-def _parse_recording_id_from_tracks_stem(stem: str) -> int | None:
-    # stem examples: "00_tracks", "17_tracks_with_ramp", etc.
-    m = re.match(r"^(\d+)", stem)          # 留� �� �レ옄
-    if not m:
-        m = re.search(r"(\d+)", stem)      # fallback: �꾨Т �レ옄
-    if not m:
-        return None
-    return int(m.group(1))
-
 def _onehot4(code: np.ndarray) -> np.ndarray:
     """code in {0,1,2,3} -> onehot (N,4) float32."""
     oh = np.zeros((len(code), 4), dtype=np.float32)
@@ -116,21 +84,12 @@ def _normalize_class_name(s: str) -> str:
     s = (s or "").strip().lower()
     if s == "" or s in {"nan", "null"}:
         return "other"
-    # common variants
-    if s in {"passenger car", "passengercar"}:
-        s = "car"
     if s not in CLASS_VOCAB:
         s = "other"
     return s
 
 
 def _build_class_map(meta_csv: Path) -> Tuple[Dict[int, str], Dict[str, int], np.ndarray]:
-    """
-    Returns:
-      class_map: trackId -> normalized class string
-      class_to_idx: class string -> index
-      class_names: (C,) np.array
-    """
     dfm = pd.read_csv(meta_csv, low_memory=False)
     if "trackId" not in dfm.columns or "class" not in dfm.columns:
         raise RuntimeError(f"{meta_csv} must contain columns: trackId, class")
@@ -152,15 +111,29 @@ def _onehot_class(class_name: str, class_to_idx: Dict[str, int]) -> np.ndarray:
     return oh
 
 
+def load_lanelet_adj(path: Path) -> Dict[int, Dict[int, Set[int]]]:
+    """
+    Load adjacency pickle.
+    Returns: map_id -> { lanelet_id -> set(adjacent_lanelet_ids) }
+    """
+    if not path.exists():
+        print(f"[WARN] Adjacency pickle not found: {path}. Filtering will be skipped.")
+        return {}
+    try:
+        with open(path, "rb") as f:
+            obj = pickle.load(f)
+        # Handle strict structure from scenario_label.py
+        return obj.get("adj_by_map", obj)
+    except Exception as e:
+        print(f"[WARN] Failed to load adjacency pickle: {e}")
+        return {}
+
+
 def build_vehicle_maps(
     track_ids: np.ndarray, frames: np.ndarray
 ) -> Tuple[np.ndarray, Dict[int, np.ndarray], Dict[int, Dict[int, int]]]:
     """
-    Build:
-      uniq_ids: (V,)
-      veh_rows: vid -> row indices (contiguous blocks if sorted by vid then frame)
-      frame_to_pos: vid -> {frame -> position_in_veh_rows}
-    Requires arrays are sorted by (trackId, frame).
+    Build efficient lookups.
     """
     uniq_ids, start_idx, counts = np.unique(track_ids, return_index=True, return_counts=True)
     veh_rows: Dict[int, np.ndarray] = {}
@@ -186,65 +159,67 @@ def make_windows_for_tracks_csv(
     min_speed_mps: float = 0.0,
     drop_vru: bool = True,
     keep_only_vru_cases: bool = False,
-    recording_id: int | None = None
+    adjacent_only: bool = False,
+    adj_db: Optional[Dict] = None,
 ) -> Tuple[int, Optional[str]]:
+
+    # 1. Read Tracks
     try:
         df = pd.read_csv(tracks_csv, low_memory=False)
     except Exception as e:
         return 0, f"Failed to read {tracks_csv}: {e}"
 
-    # meta csv next to tracks
+    # 2. Read Meta (Tracks & Recording)
     meta_csv = tracks_csv.with_name(tracks_csv.name.replace("_tracks.csv", "_tracksMeta.csv"))
+    rec_meta_csv = tracks_csv.with_name(tracks_csv.name.replace("_tracks.csv", "_recordingMeta.csv"))
+    
     if not meta_csv.exists():
         return 0, f"Missing tracksMeta: {meta_csv.name}"
-
+    
+    # Get Map ID (locationId) for Adjacency
+    map_id = -1
+    if rec_meta_csv.exists():
+        try:
+            rdf = pd.read_csv(rec_meta_csv, low_memory=False)
+            if "locationId" in rdf.columns:
+                map_id = int(rdf["locationId"].iloc[0])
+        except Exception:
+            pass
+            
     try:
         class_map, class_to_idx, class_names = _build_class_map(meta_csv)
     except Exception as e:
         return 0, f"Failed to read/parse {meta_csv.name}: {e}"
 
-    # ---- required columns check ----
+    # 3. Check Columns
+    # Added "laneletId" for adjacency check
     required = [
-        "trackId",
-        "frame",
-        # main x/y for TP
-        "xCenter",
-        "yCenter",
-        "xVelocity",
-        "yVelocity",
-        "xAcceleration",
-        "yAcceleration",
-        # ego lane/context
-        "latLaneCenterOffset",
-        "laneWidth",
-        "laneChange",
-        # ego safety
-        "leadDHW",
-        "leadDV",
-        "leadTHW",
-        "leadTTC",
-        # ramp context
-        "ramp_type",
-        # size
-        "width",
-        "length",
+        "trackId", "frame", "xCenter", "yCenter",
+        "lonVelocity", "latVelocity", "lonAcceleration", "latAcceleration",
+        "latLaneCenterOffset", "laneWidth", "laneChange",
+        "leadDHW", "leadDV", "leadTHW", "leadTTC",
+        "ramp_type", "width", "length", "laneletId"
     ] + NEIGHBOR_COLS_8
 
     missing = [c for c in required if c not in df.columns]
-    if missing:
-        return 0, f"Missing required columns: {missing}"
-
-    # ---- sort & downsample ----
+    # Allow laneletId to be missing if not doing adjacency, but prefer having it.
+    if missing and (adjacent_only and "laneletId" in missing):
+         return 0, f"Missing columns for adjacency: {missing}"
+    
+    # 4. Sort & Downsample
     df = df.sort_values(["trackId", "frame"], kind="mergesort").reset_index(drop=True)
-
     ds_step = compute_downsample_step(source_hz, target_hz)
     df = df[((df["frame"].astype(int) - 1) % ds_step) == 0].copy()
     if df.empty:
         return 0, "Downsample produced no rows."
 
-    # ---- extract arrays ----
+    rec_ids = df["recordingId"].dropna().unique()
+    rec_id = int(rec_ids[0]) if len(rec_ids) == 1 else -1
+
+    # 5. Extract Arrays (Numpy)
     track_ids = df["trackId"].astype(np.int32).to_numpy()
     frames = df["frame"].astype(np.int32).to_numpy()
+    lanelet_ids = df["laneletId"].fillna(-1).astype(np.int32).to_numpy() if "laneletId" in df.columns else np.full(len(df), -1, dtype=np.int32)
 
     x = df["xCenter"].astype(np.float32).to_numpy()
     y = df["yCenter"].astype(np.float32).to_numpy()
@@ -265,46 +240,32 @@ def make_windows_for_tracks_csv(
     lead_thw = _safe_float(df["leadTHW"].to_numpy(np.float32), 0.0)
     lead_ttc = _safe_float(df["leadTTC"].to_numpy(np.float32), 0.0)
 
-    # neighbor ids (take FIRST if '287;285')
-    def _parse_id_cell(v) -> int:
-        if pd.isna(v):
-            return -1
-        if isinstance(v, (int, np.integer)):
-            return int(v)
-        if isinstance(v, (float, np.floating)):
-            if np.isnan(v):
-                return -1
-            return int(v)
-        s = str(v).strip()
-        if s == "" or s.lower() in {"nan", "null"}:
-            return -1
-        s = s.split(";")[0].split(",")[0].strip()
-        try:
-            return int(float(s))
-        except Exception:
-            return -1
+    # Optimized Neighbor Parsing
+    nb_ids_cols = []
+    for col in NEIGHBOR_COLS_8:
+        s = df[col].astype(str).str.strip()
+        s = s.str.split(';').str[0]
+        s = pd.to_numeric(s, errors='coerce').fillna(-1).astype(np.int32)
+        nb_ids_cols.append(s.to_numpy())
+    
+    nb_ids_all = np.stack(nb_ids_cols, axis=1) # (N, 8)
 
-    nb_ids_all = (
-        df[NEIGHBOR_COLS_8]
-        .apply(lambda col: col.map(_parse_id_cell))
-        .astype(np.int32)
-        .to_numpy()
-    )
-
-    # ---- ramp onehot etc ----
-    ramp_code = _normalize_ramp_type_series(df["ramp_type"])
+    # Ramp Onehot
+    RAMP_MAP = {"none": 0, "onramp": 1, "offramp": 2, "not_found": 3}
+    ramp_code = df["ramp_type"].map(RAMP_MAP).fillna(3).astype(np.int8).to_numpy()
     ramp_oh = _onehot4(ramp_code)
 
+    # Norm Offset
     eps = 1e-6
     half_w = np.maximum(lane_w * 0.5, eps).astype(np.float32)
     norm_off = (lat_center_off / half_w).astype(np.float32)
 
     speed = np.sqrt(xv * xv + yv * yv) if min_speed_mps > 0.0 else None
 
-    # ---- per-vehicle maps ----
+    # 6. Build Maps
     uniq_ids, veh_rows, frame_to_pos = build_vehicle_maps(track_ids, frames)
 
-    # per-vehicle static lookup (from first row after downsample)
+    # Static Lookup
     veh_width: Dict[int, float] = {}
     veh_length: Dict[int, float] = {}
     veh_class: Dict[int, str] = {}
@@ -317,46 +278,39 @@ def make_windows_for_tracks_csv(
     def is_vru_trackid(tid: int) -> bool:
         return veh_class.get(int(tid), "other") in VRU_CLASSES
 
+    # Adjacency Set for current Map
+    current_adj_set: Dict[int, Set[int]] = {}
+    if adjacent_only and adj_db and map_id in adj_db:
+        current_adj_set = adj_db[map_id]
+
+    # Time Parameters
     T = int(round(history_sec * target_hz))
     Tf = int(round(future_sec * target_hz))
     stride = max(1, int(round(stride_sec * target_hz)))
+    win_len = T + Tf
+    expected_gap = ds_step
 
-    if T <= 0 or Tf <= 0:
-        return 0, f"Invalid T/Tf: T={T}, Tf={Tf}."
+    # Recording Level Shift
+    min_x = float(np.nanmin(x)) if x.size > 0 else 0.0
+    min_y = float(np.nanmin(y)) if y.size > 0 else 0.0
+    if not np.isfinite(min_x): min_x = 0.0
+    if not np.isfinite(min_y): min_y = 0.0
+
+    x_shift = (x - min_x).astype(np.float32)
+    y_shift = (y - min_y).astype(np.float32)
+
+    # ---- Collect Samples ----
+    X_list, Y_list = [], []
+    YV_list, YA_list = [], []
+    NB_list, NBmask_list = [], []
+    EgoStatic_list, NBStatic_list = [], []
+    trackId_list, t0_list = [], []
 
     K = 8
     ego_dim = 18
     nb_dim = 6
     C = len(CLASS_VOCAB)
     static_dim = 2 + C
-
-    win_len = T + Tf
-    expected_gap = ds_step
-
-    # ==========================================================
-    # Recording-level coordinate shift (global min over all frames)
-    # ==========================================================
-    min_x = float(np.nanmin(x)) if x.size > 0 else 0.0
-    min_y = float(np.nanmin(y)) if y.size > 0 else 0.0
-    if not np.isfinite(min_x):
-        min_x = 0.0
-    if not np.isfinite(min_y):
-        min_y = 0.0
-
-    x_shift = (x - min_x).astype(np.float32)
-    y_shift = (y - min_y).astype(np.float32)
-
-    # ---- collect samples ----
-    X_list: List[np.ndarray] = []
-    Y_list: List[np.ndarray] = []
-    NB_list: List[np.ndarray] = []
-    NBmask_list: List[np.ndarray] = []
-    EgoStatic_list: List[np.ndarray] = []
-    NBStatic_list: List[np.ndarray] = []
-    trackId_list: List[int] = []
-    t0_list: List[int] = []
-    YV_list: List[np.ndarray] = []   # (Tf,2) lon/lat velocity
-    YA_list: List[np.ndarray] = []   # (Tf,2) lon/lat acceleration
 
     for vid in uniq_ids.tolist():
         idxs = veh_rows[int(vid)]
@@ -368,6 +322,7 @@ def make_windows_for_tracks_csv(
         ego_is_vru = is_vru_trackid(int(vid))
 
         for i in range(0, n - win_len + 1, stride):
+            # Check frame continuity
             f0 = int(f[i])
             f_last = int(f[i + win_len - 1])
             if f_last - f0 != expected_gap * (win_len - 1):
@@ -376,158 +331,129 @@ def make_windows_for_tracks_csv(
             hist_rows = idxs[i : i + T]
             fut_rows  = idxs[i + T : i + win_len]
 
+            # Filter: Min Speed
             if speed is not None and float(np.nanmax(speed[hist_rows])) < float(min_speed_mps):
                 continue
 
-            # ==========================================================
-            # drop window if any laneWidth in HISTORY is < 3.0 or non-finite
-            # ==========================================================
+            # Filter: Lane Width
             lw_hist = lane_w[hist_rows]
-            if (not np.all(np.isfinite(lw_hist))) or np.any(lw_hist < LANEWIDTH_DROP_TH):
+            if np.any(lw_hist < LANEWIDTH_DROP_TH):
                 continue
 
-            # window-level VRU detection (history)
+            # VRU Logic
             any_nb_vru = False
-            if not ego_is_vru:
-                for t in range(T):
-                    row_ids = nb_ids_all[hist_rows[t]]
-                    for nid in row_ids.tolist():
-                        if nid >= 0 and is_vru_trackid(int(nid)):
-                            any_nb_vru = True
-                            break
-                    if any_nb_vru:
-                        break
+            if (drop_vru or keep_only_vru_cases) and not ego_is_vru:
+                 all_nbs = nb_ids_all[hist_rows].flatten()
+                 for nid in all_nbs:
+                     if nid >= 0 and is_vru_trackid(int(nid)):
+                         any_nb_vru = True
+                         break
+            
             vru_involving = ego_is_vru or any_nb_vru
-
-            # filtering policy
             if keep_only_vru_cases:
-                if not vru_involving:
-                    continue
-            else:
-                if drop_vru and vru_involving:
-                    continue
+                if not vru_involving: continue
+            elif drop_vru:
+                if vru_involving: continue
 
+            # --- Sample Construction ---
+            
+            # Lead exists logic
             lead_exists = (nb_ids_all[hist_rows, 0] > -1).astype(np.float32)
 
-            # take window slices
-            dhw_w = lead_dhw[hist_rows].astype(np.float32, copy=False)
-            dv_w  = lead_dv[hist_rows].astype(np.float32, copy=False)
-            thw_w = lead_thw[hist_rows].astype(np.float32, copy=False)
-            ttc_w = lead_ttc[hist_rows].astype(np.float32, copy=False)
+            # Safety Metrics (Vectorized Ops)
+            dhw_w = np.maximum(0.0, _safe_float(lead_dhw[hist_rows]))
+            dv_w  = _safe_float(lead_dv[hist_rows])
+            thw_w = np.maximum(0.0, _safe_float(lead_thw[hist_rows]))
+            ttc_w = np.maximum(0.0, _safe_float(lead_ttc[hist_rows]))
 
-            # sanitize: non-finite already handled by _safe_float, but keep defensive
-            dhw_w = np.where(np.isfinite(dhw_w), dhw_w, 0.0).astype(np.float32)
-            dv_w  = np.where(np.isfinite(dv_w),  dv_w,  0.0).astype(np.float32)
-            thw_w = np.where(np.isfinite(thw_w), thw_w, 0.0).astype(np.float32)
-            ttc_w = np.where(np.isfinite(ttc_w), ttc_w, 0.0).astype(np.float32)
+            # Clip
+            thw_w = np.where(lead_exists, np.minimum(thw_w, LEAD_THW_CAP), 0.0)
+            ttc_w = np.where(lead_exists, np.minimum(ttc_w, LEAD_TTC_CAP), 0.0)
+            dhw_w = np.where(lead_exists, dhw_w, 0.0)
+            dv_w  = np.where(lead_exists, dv_w, 0.0)
 
-            dhw_w = np.where(dhw_w > 0.0, dhw_w, 0.0).astype(np.float32)
-            thw_w = np.where(thw_w > 0.0, thw_w, 0.0).astype(np.float32)
-            ttc_w = np.where(ttc_w > 0.0, ttc_w, 0.0).astype(np.float32)
+            # Ego History
+            ego_hist = np.stack([
+                x_shift[hist_rows], y_shift[hist_rows],
+                xv[hist_rows], yv[hist_rows],
+                xa[hist_rows], ya[hist_rows],
+                lat_center_off[hist_rows],
+                lane_change[hist_rows],
+                norm_off[hist_rows],
+                dhw_w, dv_w, thw_w, ttc_w, lead_exists,
+                ramp_oh[hist_rows, 0], ramp_oh[hist_rows, 1],
+                ramp_oh[hist_rows, 2], ramp_oh[hist_rows, 3],
+            ], axis=-1).astype(np.float32)
 
-            # clip only when lead exists
-            thw_w = np.where(lead_exists > 0.0, np.minimum(thw_w, LEAD_THW_CAP), 0.0).astype(np.float32)
-            ttc_w = np.where(lead_exists > 0.0, np.minimum(ttc_w, LEAD_TTC_CAP), 0.0).astype(np.float32)
-            dhw_w = np.where(lead_exists > 0.0, dhw_w, 0.0).astype(np.float32)
-            dv_w  = np.where(lead_exists > 0.0, dv_w, 0.0).astype(np.float32)
+            # Future
+            y_fut = np.stack([x_shift[fut_rows], y_shift[fut_rows]], axis=-1)
+            y_fut_vel = np.stack([xv[fut_rows], yv[fut_rows]], axis=-1)
+            y_fut_acc = np.stack([xa[fut_rows], ya[fut_rows]], axis=-1)
 
-            # ego history (T,18)  --- x/y shifted by recording-global min ---
-            ego_hist = np.stack(
-                [
-                    x_shift[hist_rows],
-                    y_shift[hist_rows],
-                    xv[hist_rows],
-                    yv[hist_rows],
-                    xa[hist_rows],
-                    ya[hist_rows],
-                    lat_center_off[hist_rows],
-                    lane_change[hist_rows],
-                    norm_off[hist_rows],
-                    dhw_w,          # leadDHW (gated)
-                    dv_w,           # leadDV  (gated)
-                    thw_w,          # leadTHW (gated + clip 20)
-                    ttc_w,          # leadTTC (gated + clip 90)
-                    lead_exists,    # hasLead/lead_exists (same index �좎�)
-                    ramp_oh[hist_rows, 0],
-                    ramp_oh[hist_rows, 1],
-                    ramp_oh[hist_rows, 2],
-                    ramp_oh[hist_rows, 3],
-                ],
-                axis=-1,
-            ).astype(np.float32)
+            # Ego Static
+            ego_static = np.concatenate([
+                [veh_width.get(int(vid), 0.0), veh_length.get(int(vid), 0.0)],
+                _onehot_class(veh_class.get(int(vid), "other"), class_to_idx)
+            ], axis=0).astype(np.float32)
 
-            # future label (Tf,2) --- shifted by recording-global min ---
-            y_fut = np.stack(
-                [x_shift[fut_rows], y_shift[fut_rows]],
-                axis=-1
-            ).astype(np.float32)
-
-            # future GT lon/lat velocity & acceleration (Tf,2)
-            y_fut_vel = np.stack(
-                [xv[fut_rows], yv[fut_rows]],
-                axis=-1
-            ).astype(np.float32)
-
-            y_fut_acc = np.stack(
-                [xa[fut_rows], ya[fut_rows]],
-                axis=-1
-            ).astype(np.float32)
-
-            # ego static: (2+C,)
-            ego_w = veh_width.get(int(vid), 0.0)
-            ego_l = veh_length.get(int(vid), 0.0)
-            ego_cls = veh_class.get(int(vid), "other")
-            ego_static = np.concatenate(
-                [np.array([ego_w, ego_l], dtype=np.float32), _onehot_class(ego_cls, class_to_idx)],
-                axis=0,
-            ).astype(np.float32)
-
-            # neighbors history (T,K,6) + mask (T,K)
+            # --- Neighbor Processing ---
             nb_hist = np.zeros((T, K, nb_dim), dtype=np.float32)
             nb_mask = np.zeros((T, K), dtype=bool)
-
-            # neighbors static aligned with slot ids per time: (T,K,2+C)
             nb_static = np.zeros((T, K, static_dim), dtype=np.float32)
 
             hist_frames = frames[hist_rows]
 
             for t in range(T):
                 fr = int(hist_frames[t])
+                ego_r = hist_rows[t]
+                ego_lane = lanelet_ids[ego_r]
+                
+                row_nb_ids = nb_ids_all[ego_r]  # (K,)
 
-                row_nb_ids = nb_ids_all[hist_rows[t]]  # (K,)
                 for k in range(K):
                     nid = int(row_nb_ids[k])
                     if nid < 0:
                         continue
-
-                    # static for this slot at this time
-                    nw = veh_width.get(nid, 0.0)
-                    nl = veh_length.get(nid, 0.0)
-                    ncls = veh_class.get(nid, "other")
-                    nb_static[t, k, :] = np.concatenate(
-                        [np.array([nw, nl], dtype=np.float32), _onehot_class(ncls, class_to_idx)],
-                        axis=0,
-                    )
-
-                    # dynamic requires same-frame lookup
-                    d = frame_to_pos.get(nid)
-                    if d is None:
-                        continue
-                    pos_in = d.get(fr)
-                    if pos_in is None:
-                        continue
+                    
+                    # 1. Look up neighbor index
+                    d_pos = frame_to_pos.get(nid)
+                    if d_pos is None: continue
+                    pos_in = d_pos.get(fr)
+                    if pos_in is None: continue
                     nb_row = veh_rows[nid][pos_in]
 
+                    # 2. ADJACENCY FILTERING (CORRECTED)
+                    # k=0 (leadId) and k=1 (rearId) are SAME LANE -> Always Keep.
+                    # k>=2 are SIDE NEIGHBORS -> Check Adjacency if required.
+                    if adjacent_only and k >= 2:
+                        nb_lane = lanelet_ids[nb_row]
+                        
+                        # If lane info missing or not in map, safe fallback is to drop
+                        # because we want strict physical adjacency.
+                        if ego_lane == -1 or nb_lane == -1:
+                            continue
+                        if ego_lane not in current_adj_set:
+                            continue
+                        
+                        # If not in the adjacency set, it's not a physically adjacent lane.
+                        if nb_lane not in current_adj_set[ego_lane]:
+                            continue
+
+                    # 3. Fill Data if Valid
                     nb_mask[t, k] = True
 
-                    # neighbors use ego-relative coordinates (nb - ego) to match highD pipeline
-                    ego_row = hist_rows[t]
-                    nb_hist[t, k, 0] = float(x_shift[nb_row] - x_shift[ego_row])
-                    nb_hist[t, k, 1] = float(y_shift[nb_row] - y_shift[ego_row])
-                    nb_hist[t, k, 2] = float(xv[nb_row] - xv[ego_row])
-                    nb_hist[t, k, 3] = float(yv[nb_row] - yv[ego_row])
-                    nb_hist[t, k, 4] = float(xa[nb_row] - xa[ego_row])
-                    nb_hist[t, k, 5] = float(ya[nb_row] - ya[ego_row])
+                    # Static
+                    nb_static[t, k, 0] = veh_width.get(nid, 0.0)
+                    nb_static[t, k, 1] = veh_length.get(nid, 0.0)
+                    nb_static[t, k, 2:] = _onehot_class(veh_class.get(nid, "other"), class_to_idx)
+
+                    # Dynamic (Ego Relative)
+                    nb_hist[t, k, 0] = float(x_shift[nb_row] - x_shift[ego_r])
+                    nb_hist[t, k, 1] = float(y_shift[nb_row] - y_shift[ego_r])
+                    nb_hist[t, k, 2] = float(xv[nb_row] - xv[ego_r])
+                    nb_hist[t, k, 3] = float(yv[nb_row] - yv[ego_r])
+                    nb_hist[t, k, 4] = float(xa[nb_row] - xa[ego_r])
+                    nb_hist[t, k, 5] = float(ya[nb_row] - ya[ego_r])
 
             X_list.append(ego_hist)
             Y_list.append(y_fut)
@@ -543,23 +469,21 @@ def make_windows_for_tracks_csv(
     if len(X_list) == 0:
         return 0, "No valid samples produced."
 
-    x_hist = np.stack(X_list, axis=0).astype(np.float32)
+    # Stack
+    x_hist = np.stack(X_list, axis=0)
     y_fut = np.stack(Y_list, axis=0).astype(np.float32)
-    y_fut_vel = np.stack(YV_list, axis=0).astype(np.float32)  # (N,Tf,2)
-    y_fut_acc = np.stack(YA_list, axis=0).astype(np.float32)  # (N,Tf,2)
-    nb_hist = np.stack(NB_list, axis=0).astype(np.float32)
-    nb_mask = np.stack(NBmask_list, axis=0).astype(bool)
-    ego_static = np.stack(EgoStatic_list, axis=0).astype(np.float32)
-    nb_static = np.stack(NBStatic_list, axis=0).astype(np.float32)  # (N,T,K,static_dim)
-
+    y_fut_vel = np.stack(YV_list, axis=0).astype(np.float32)
+    y_fut_acc = np.stack(YA_list, axis=0).astype(np.float32)
+    nb_hist = np.stack(NB_list, axis=0)
+    nb_mask = np.stack(NBmask_list, axis=0)
+    ego_static = np.stack(EgoStatic_list, axis=0)
+    nb_static = np.stack(NBStatic_list, axis=0)
+    
     trackId_arr = np.asarray(trackId_list, dtype=np.int32)
     t0_arr = np.asarray(t0_list, dtype=np.int32)
+    recordingId_arr = np.full((len(trackId_list),), rec_id, dtype=np.int32)
 
-    N = int(len(trackId_list))
-    recordingId_arr = None
-    if recording_id is not None:
-        recordingId_arr = np.full((N,), int(recording_id), dtype=np.int32)
-
+    # Save
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         out_path,
@@ -574,8 +498,7 @@ def make_windows_for_tracks_csv(
         trackId=trackId_arr,
         t0_frame=t0_arr,
         class_names=class_names,
-        # meta
-        recordingId=recordingId_arr if recordingId_arr is not None else np.zeros((N,), dtype=np.int32),
+        recordingId=recordingId_arr,
         T=np.array([T], dtype=np.int32),
         Tf=np.array([Tf], dtype=np.int32),
         K=np.array([K], dtype=np.int32),
@@ -601,51 +524,45 @@ def make_windows_for_tracks_csv(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tracks_dir", type=str, default="raw/", help="Directory containing *_tracks.csv (e.g., raw/)")
-    ap.add_argument("--glob", type=str, default="*_tracks.csv", help="Glob pattern (default: *_tracks.csv)")
-    ap.add_argument(
-        "--out_root",
-        type=str,
-        default="data_npz",
-        help="Root directory for generated npz folders",
-    )
+    ap.add_argument("--tracks_dir", type=str, default="raw/", help="Directory containing *_tracks.csv")
+    ap.add_argument("--glob", type=str, default="*_tracks.csv", help="Glob pattern")
+    ap.add_argument("--out_root", type=str, default="data_npz", help="Output root directory")
 
-    ap.add_argument("--source_hz", type=float, default=25.0)
-    ap.add_argument("--target_hz", type=float, default=5.0)
-    ap.add_argument("--history_sec", type=float, default=2.0)
-    ap.add_argument("--future_sec", type=float, default=5.0)
-    ap.add_argument("--stride_sec", type=float, default=1.0)
+    ap.add_argument("--source_hz", type=int, default=25)
+    ap.add_argument("--target_hz", type=int, default=3)
+    ap.add_argument("--history_sec", type=int, default=2)
+    ap.add_argument("--future_sec", type=int, default=5)
+    ap.add_argument("--stride_sec", type=int, default=1)
     ap.add_argument("--min_speed_mps", type=float, default=0.0)
 
-    ap.add_argument("--drop_vru", action="store_true", help="Drop windows involving VRU (default behavior).")
-    ap.add_argument(
-        "--keep_only_vru_cases",
-        action="store_true",
-        help="Keep ONLY windows involving VRU (for corner-case split).",
-    )
+    ap.add_argument("--drop_vru", action="store_true", help="Drop windows involving VRU.")
+    ap.add_argument("--keep_only_vru_cases", action="store_true", help="Keep ONLY windows involving VRU.")
+    
+    ap.add_argument("--adjacent_only", action="store_true", help="Filter neighbors: include only those in physically adjacent lanelets.")
+    ap.add_argument("--lanelet_adj_pkl", type=str, default="maps/lanelet_adj_allmaps.pkl", help="Path to adjacency pickle.")
 
     args = ap.parse_args()
 
-    # ---- auto out_dir naming ----
+    # Determine VRU policy
+    drop_vru = True if (not args.keep_only_vru_cases) else False
+    if args.drop_vru: drop_vru = True
+    if args.keep_only_vru_cases: drop_vru = False
+
+    # Load Adjacency DB once
+    adj_db = {}
+    if args.adjacent_only:
+        adj_db = load_lanelet_adj(Path(args.lanelet_adj_pkl))
+        if not adj_db:
+            print("[WARN] Adjacency filter enabled but DB empty or not found. Neighbors will NOT be filtered correctly.")
+
     T_sec = int(round(args.history_sec))
     Tf_sec = int(round(args.future_sec))
     hz = int(round(args.target_hz))
 
-    out_dir = (
-        Path(args.out_root)
-        / f"exid_T{T_sec}_Tf{Tf_sec}_hz{hz}"
-    )
+    out_dir = Path(args.out_root) / f"exid_T{T_sec}_Tf{Tf_sec}_hz{hz}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # default behavior: drop VRU unless keep_only_vru_cases enabled
-    drop_vru = True if (not args.keep_only_vru_cases) else False
-    if args.drop_vru:
-        drop_vru = True
-    if args.keep_only_vru_cases:
-        drop_vru = False
-
     tracks_dir = Path(args.tracks_dir)
-
     files = sorted(tracks_dir.glob(args.glob))
     if not files:
         raise SystemExit(f"No files found in {tracks_dir} with pattern {args.glob}")
@@ -654,7 +571,6 @@ def main():
     ok_files = 0
     for tracks_csv in files:
         out_path = out_dir / f"exid_{tracks_csv.stem.replace('_tracks','')}.npz"
-        rid = _parse_recording_id_from_tracks_stem(tracks_csv.stem)
         n, err = make_windows_for_tracks_csv(
             tracks_csv=tracks_csv,
             out_path=out_path,
@@ -666,7 +582,8 @@ def main():
             min_speed_mps=args.min_speed_mps,
             drop_vru=drop_vru,
             keep_only_vru_cases=args.keep_only_vru_cases,
-            recording_id=rid
+            adjacent_only=args.adjacent_only,
+            adj_db=adj_db
         )
         if err is not None:
             print(f"[SKIP] {tracks_csv.name}  reason={err}")
@@ -677,11 +594,6 @@ def main():
         ok_files += 1
 
     print(f"[DONE] ok_files={ok_files}/{len(files)} total_samples={total}")
-    if args.keep_only_vru_cases:
-        print("[INFO] keep_only_vru_cases enabled: produced VRU-involving subset only.")
-    else:
-        print(f"[INFO] drop_vru={drop_vru}")
-
 
 if __name__ == "__main__":
     main()

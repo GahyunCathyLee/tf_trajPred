@@ -101,8 +101,8 @@ def main():
     if mode not in ("exid", "highd", "combined"):
         raise ValueError(f"data.mode must be one of exid/highd/combined, got: {mode}")
 
-    use_ego_static = bool(cfg.get("data", {}).get("use_ego_static", True))
-    use_nb_static = bool(cfg.get("data", {}).get("use_nb_static", True))
+    use_ego_static = bool(cfg.get("features", {}).get("use_ego_static", True))
+    use_nb_static = bool(cfg.get("features", {}).get("use_nb_static", True))
 
     # -------------------------
     # stats (subprocess only)

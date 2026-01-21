@@ -1,4 +1,4 @@
-#src/losses.py
+# src/losses.py
 from __future__ import annotations
 import torch
 import torch.nn as nn
@@ -8,31 +8,23 @@ from typing import Optional, Tuple
 def trajectory_loss(
     pred: torch.Tensor,
     y_abs: torch.Tensor,
-    x_last_abs: torch.Tensor,
-    predict_delta: bool,
     w_traj: float = 1.0,
     w_fde: float = 0.0,
 ) -> torch.Tensor:
     """
-    Simple L2 loss in absolute space + optional FDE term.
-    pred: (B,Tf,2)
+    Optimized Trajectory Loss.
     """
-    l2 = torch.norm(pred - y_abs, dim=-1).mean()
+    
+    dist = torch.norm(pred - y_abs, dim=-1) # (B, Tf)
+    l2 = dist.mean()
+    
+    loss = w_traj * l2
+    
     if w_fde > 0.0:
-        f = torch.norm(pred[:, -1, :] - y_abs[:, -1, :], dim=-1).mean()
-        return w_traj * l2 + w_fde * f
-    return w_traj * l2
-
-def _best_mode_by_minade(pred_abs_all: torch.Tensor, y_abs: torch.Tensor) -> torch.Tensor:
-    """
-    pred_abs_all: (B,M,Tf,2) absolute
-    y_abs:        (B,Tf,2)
-    return: best_idx (B,)
-    """
-    err = torch.norm(pred_abs_all - y_abs[:, None, :, :], dim=-1)  # (B,M,Tf)
-    ade_bm = err.mean(dim=-1)                                      # (B,M)
-    return ade_bm.argmin(dim=1)
-
+        f = dist[:, -1].mean()
+        loss += w_fde * f
+        
+    return loss
 
 def multimodal_loss(
     pred: torch.Tensor,
@@ -45,12 +37,8 @@ def multimodal_loss(
     w_cls: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    pred: (B,M,Tf,2)
-    score_logits: (B,M) or None
-
-    - Choose best mode by ADE (abs space)
-    - Regression loss on best mode
-    - Optional classification loss encouraging best mode (cross entropy on logits)
+    Optimized Multimodal Loss.
+    Removes redundant coordinate extraction and norm calculation.
     """
     B, M, Tf, _ = pred.shape
 
@@ -59,20 +47,27 @@ def multimodal_loss(
     else:
         pred_abs_all = pred
 
-    # ADE per mode: (B,M)
-    ade_m = torch.norm(pred_abs_all - y_abs[:, None, :, :], dim=-1).mean(dim=-1)
+    err_dist = torch.norm(pred_abs_all - y_abs[:, None, :, :], dim=-1) 
+
+    ade_m = err_dist.mean(dim=-1)  # (B, M)
     best_idx = torch.argmin(ade_m, dim=1)  # (B,)
+    
+    gather_idx = best_idx.view(B, 1, 1).expand(B, 1, Tf)
+    
+    # (B, 1, Tf) -> (B, Tf)
+    best_dist = torch.gather(err_dist, 1, gather_idx).squeeze(1)
 
-    best_pred_abs = pred_abs_all[torch.arange(B, device=pred.device), best_idx]  # (B,Tf,2)
+    reg_loss = best_dist.mean() # ADE of best mode
 
-    reg = torch.norm(best_pred_abs - y_abs, dim=-1).mean()
     if w_fde > 0.0:
-        reg = reg + w_fde * torch.norm(best_pred_abs[:, -1, :] - y_abs[:, -1, :], dim=-1).mean()
+        fde_loss = best_dist[:, -1].mean() # FDE of best mode
+        reg_loss = reg_loss + w_fde * fde_loss
 
-    loss = w_traj * reg
+    loss = w_traj * reg_loss
 
+    # 5. Classification Loss
     if (score_logits is not None) and (w_cls > 0.0):
-        cls = nn.functional.cross_entropy(score_logits, best_idx)
-        loss = loss + w_cls * cls
+        cls_loss = F.cross_entropy(score_logits, best_idx)
+        loss = loss + w_cls * cls_loss
 
     return loss, best_idx
