@@ -129,8 +129,10 @@ def main():
         assert_stats_match_batch_dims(stats, ego_dim_cfg, nb_dim_cfg, stats_path)
 
     # -------------------------
-    # datasets / loaders
+    # datasets / loaders setup
     # -------------------------
+    eval_targets = []
+
     if mode == "exid":
         test_ds = PtWindowDataset(
             data_dir=exid_pt_dir,
@@ -141,6 +143,7 @@ def main():
             use_nb_static=use_nb_static,
             dataset_name="exid",
         )
+        eval_targets.append(("exid", test_ds))
 
     elif mode == "highd":
         test_ds = PtWindowDataset(
@@ -152,8 +155,10 @@ def main():
             use_nb_static=use_nb_static,
             dataset_name="highd",
         )
+        eval_targets.append(("highd", test_ds))
 
     else:
+        # Combined 모드인 경우: 개별 데이터셋을 먼저 로드
         exid_test_ds = PtWindowDataset(
             data_dir=exid_pt_dir,
             split_txt=exid_splits_dir / "test.txt",
@@ -172,21 +177,17 @@ def main():
             use_nb_static=use_nb_static,
             dataset_name="highd",
         )
-        test_ds = ConcatDataset([exid_test_ds, highd_test_ds])
+        combined_ds = ConcatDataset([exid_test_ds, highd_test_ds])
 
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-        drop_last=False,
-        collate_fn=collate_batch,
-        persistent_workers=(num_workers > 0),
-    )
+        # 1. 전체(Combined) 평가
+        eval_targets.append(("combined", combined_ds))
+        # 2. exiD 만 따로 평가
+        eval_targets.append(("exid_only", exid_test_ds))
+        # 3. highD 만 따로 평가
+        eval_targets.append(("highd_only", highd_test_ds))
 
     # -------------------------
-    # scenario labels
+    # Loop over targets
     # -------------------------
     labels_lut = None
     labels_cfg = cfg.get("data", {}).get("scenario_labels", None)
@@ -201,73 +202,94 @@ def main():
                 merged.update(load_window_labels_csv(Path(labels_cfg["highd"])))
             labels_lut = merged
 
-    save_event_path = Path(args.save_event_csv) if args.save_event_csv else None
-    save_state_path = Path(args.save_state_csv) if args.save_state_csv else None
-    
-    # -------------------------
-    # model
-    # -------------------------
+
     model = build_model(cfg).to(device)
     state_dict = _load_ckpt_state_dict(Path(args.ckpt))
     model.load_state_dict(state_dict, strict=True)
     model.to(device)
+    model.eval() 
 
-    # -------------------------
-    # eval (engine.evaluate)
-    # -------------------------
     loss_cfg = cfg.get("loss", {})
     predict_delta = bool(cfg.get("model", {}).get("predict_delta", False))
     epoch_for_csv = args.epoch if args.epoch is not None else -1
     data_hz = float(cfg.get("data", {}).get("hz", 0.0))
 
-    metrics = evaluate(
-        model=model,
-        loader=test_loader,
-        device=device,
-        use_amp=bool(args.use_amp),
-        predict_delta=predict_delta,
-        w_traj=float(loss_cfg.get("w_traj", 1.0)),
-        w_fde=float(loss_cfg.get("w_fde", 1.0)),
-        w_cls=float(loss_cfg.get("w_cls", 1.0)),
-        data_hz=data_hz,
-        labels_lut=labels_lut,
-        save_event_path=save_event_path,
-        save_state_path=save_state_path,
-        epoch=epoch_for_csv,
-        measure_latency=True,
-        latency_iters=200,
-        latency_warmup=30,
-        latency_per_sample=True,
-    )
 
-    csv_out = Path(args.csv_out) if args.csv_out else None
-    if csv_out is not None:
-        log_eval_to_csv(
-            csv_out=csv_out,
-            cfg=cfg,
-            cfg_path=cfg_path,
-            ckpt_path=Path(args.ckpt),
-            split=args.split,
-            mode=mode,
-            tag=tag,
-            device=str(device),
-            batch_size=int(batch_size),
-            num_workers=int(num_workers),
-            seed=int(args.seed),
-            use_amp=bool(args.use_amp),
-            stats_path=stats_path,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            metrics=metrics,
+    for target_name, target_ds in eval_targets:
+        print(f"\n{'='*10} Evaluating: {target_name} (Size: {len(target_ds)}) {'='*10}")
+        
+        curr_loader = DataLoader(
+            target_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=(device.type == "cuda"),
+            drop_last=False,
+            collate_fn=collate_batch,
+            persistent_workers=(num_workers > 0),
         )
-        print(f"\n[OK] appended: {csv_out}")
 
-    print(f"[RESULT] loss={metrics['loss']:.6f} ADE={metrics['ade']:.6f} FDE={metrics['fde']:.6f}")
-    print(  
-        f"[RESULT] VEL={metrics.get('vel', float('nan')):.6f} "
-        f"ACC={metrics.get('acc', float('nan')):.6f} "
-        f"JERK={metrics.get('jerk', float('nan')):.6f}"
-    )
+        # 결과 파일 이름 조정 (덮어쓰기 방지)
+        # 예: result_per_event.csv -> result_per_event_exid_only.csv
+        curr_save_event = None
+        if args.save_event_csv:
+             p = Path(args.save_event_csv)
+             curr_save_event = p.parent / f"{p.stem}_{target_name}{p.suffix}"
+        
+        curr_save_state = None
+        if args.save_state_csv:
+             p = Path(args.save_state_csv)
+             curr_save_state = p.parent / f"{p.stem}_{target_name}{p.suffix}"
+
+        metrics = evaluate(
+            model=model,
+            loader=curr_loader,
+            device=device,
+            use_amp=bool(args.use_amp),
+            predict_delta=predict_delta,
+            w_traj=float(loss_cfg.get("w_traj", 1.0)),
+            w_fde=float(loss_cfg.get("w_fde", 1.0)),
+            w_cls=float(loss_cfg.get("w_cls", 1.0)),
+            data_hz=data_hz,
+            labels_lut=labels_lut,
+            save_event_path=curr_save_event,
+            save_state_path=curr_save_state,
+            epoch=epoch_for_csv,
+            measure_latency=True,
+            latency_iters=200,
+            latency_warmup=30,
+            latency_per_sample=True,
+        )
+
+        # CSV Logging
+        csv_out = Path(args.csv_out) if args.csv_out else None
+        if csv_out is not None:
+            log_eval_to_csv(
+                csv_out=csv_out,
+                cfg=cfg,
+                cfg_path=cfg_path,
+                ckpt_path=Path(args.ckpt),
+                split=args.split,
+                mode=target_name,
+                tag=tag,
+                device=str(device),
+                batch_size=int(batch_size),
+                num_workers=int(num_workers),
+                seed=int(args.seed),
+                use_amp=bool(args.use_amp),
+                stats_path=stats_path,
+                use_ego_static=use_ego_static,
+                use_nb_static=use_nb_static,
+                metrics=metrics,
+            )
+            print(f"[OK] appended to: {csv_out} (mode={target_name})")
+
+        print(f"[RESULT] ({target_name}) loss={metrics['loss']:.6f} ADE={metrics['ade']:.6f} FDE={metrics['fde']:.6f}")
+        print(  
+            f"[RESULT] ({target_name}) VEL={metrics.get('vel', float('nan')):.6f} "
+            f"ACC={metrics.get('acc', float('nan')):.6f} "
+            f"JERK={metrics.get('jerk', float('nan')):.6f}"
+        )
 
 if __name__ == "__main__":
     main()

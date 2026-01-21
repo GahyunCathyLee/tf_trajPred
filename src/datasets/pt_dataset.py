@@ -54,7 +54,7 @@ class PtWindowDataset(Dataset):
         self.recs: List[Dict[str, torch.Tensor]] = []
         self.prefix: List[int] = [0]
         
-        print(f"[INFO] Loading {len(self.file_paths)} files into RAM... (System RAM: 500GB detected)")
+        print(f"[INFO] Loading {len(self.file_paths)} files into RAM... ")
         
         # tqdm으로 로딩 진행 상황 표시
         for p in tqdm(self.file_paths, desc="Loading Dataset"):
