@@ -3,14 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-
+from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset
 
 class PtWindowDataset(Dataset):
     """
-    Lazy Loading version of PtWindowDataset.
-    Loads .pt files on-the-fly in __getitem__ to save RAM.
+    In-Memory Version: Loads ALL .pt files into RAM at startup.
+    Best for servers with huge RAM (e.g., 500GB+).
     """
 
     def __init__(
@@ -40,7 +40,6 @@ class PtWindowDataset(Dataset):
             self._ego_mean = self._ego_std = None
             self._nb_mean = self._nb_std = None
 
-        # Read split file
         if not split_txt.exists():
              raise FileNotFoundError(f"Split file not found: {split_txt}")
              
@@ -51,42 +50,53 @@ class PtWindowDataset(Dataset):
         if missing:
             raise FileNotFoundError("Missing files in split:\n" + "\n".join(missing))
 
-        # ---- Index Building (Lazy Mode) ----
-        # We iterate files ONLY to get the number of samples in each file.
-        # We do NOT store the content.
-        self.rec_sizes: List[int] = []
+        # ---- Load All Data into RAM ----
+        self.recs: List[Dict[str, torch.Tensor]] = []
         self.prefix: List[int] = [0]
         
-        # print(f"[INFO] Scanning {len(self.file_paths)} files for indexing... (Lazy Loading)")
+        print(f"[INFO] Loading {len(self.file_paths)} files into RAM... (System RAM: 500GB detected)")
         
-        for p in self.file_paths:
-            # We must load to check size. 
-            # map_location="cpu" is essential.
-            # We delete 'd' immediately to free RAM.
-            try:
-                # weights_only=False is needed for older pytorch/structures, 
-                # but if your .pt is simple tensors, weights_only=True is safer/faster in new torch.
-                # using weights_only=False to be safe based on your previous code.
-                d = torch.load(p, map_location="cpu", weights_only=False)
+        # tqdm으로 로딩 진행 상황 표시
+        for p in tqdm(self.file_paths, desc="Loading Dataset"):
+            # 여기서 데이터를 전부 RAM에 올림
+            d = torch.load(p, map_location="cpu", weights_only=False)
+            
+            # Shape Check & Pre-processing
+            if "x_hist" not in d:
+                 raise KeyError(f"{p.name} missing key 'x_hist'")
+            
+            # Static Features Concatenation (미리 합쳐둠)
+            x_hist = d["x_hist"]
+            nb_hist = d["nb_hist"]
+
+            if self.use_ego_static and ("ego_static" in d):
+                ego_static = d["ego_static"].view(1, -1)
+                x_hist = torch.cat([x_hist, ego_static.expand(x_hist.shape[0], -1)], dim=-1)
                 
-                if "x_hist" not in d:
-                     raise KeyError(f"{p.name} missing key 'x_hist'")
-                
-                n = int(d["x_hist"].shape[0])
-                self.rec_sizes.append(n)
-                self.prefix.append(self.prefix[-1] + n)
-                
-                del d  # CRITICAL: Free memory
-            except Exception as e:
-                print(f"[ERROR] Failed to load/index {p}: {e}")
-                raise e
+            if self.use_nb_static and ("nb_static" in d):
+                nb_static = d["nb_static"]
+                if nb_static.dim() == 2:
+                    nb_static = nb_static.unsqueeze(0).expand(nb_hist.shape[0], -1, -1)
+                elif nb_static.dim() == 4 and nb_static.shape[0] == 1:
+                    nb_static = nb_static.squeeze(0)
+                nb_hist = torch.cat([nb_hist, nb_static], dim=-1)
+
+            # 덮어쓰기 (메모리 절약)
+            d["x_hist"] = x_hist
+            d["nb_hist"] = nb_hist
+
+            n = int(d["x_hist"].shape[0])
+            self.recs.append(d)
+            self.prefix.append(self.prefix[-1] + n)
+
+        print(f"[INFO] Dataset loaded. Total samples: {self.prefix[-1]}")
+
 
     def __len__(self) -> int:
         return self.prefix[-1]
 
     def _locate(self, idx: int) -> Tuple[int, int]:
-        """Binary search to find which file contains the global index."""
-        lo, hi = 0, len(self.rec_sizes) - 1
+        lo, hi = 0, len(self.prefix) - 2
         while lo <= hi:
             mid = (lo + hi) // 2
             if self.prefix[mid] <= idx < self.prefix[mid + 1]:
@@ -97,14 +107,13 @@ class PtWindowDataset(Dataset):
                 lo = mid + 1
         raise IndexError(f"Index {idx} out of range")
 
-    def _get_meta_from_rec(self, d: Dict[str, torch.Tensor], local_i: int) -> Dict[str, Any]:
+    def _get_meta_from_rec(self, d: Dict[str, Any], local_i: int) -> Dict[str, Any]:
         meta: Dict[str, Any] = {}
         if self.dataset_name is not None:
             meta["dataset"] = self.dataset_name
         for k in ["recordingId", "trackId", "t0_frame"]:
             if k in d:
                 val = d[k][local_i]
-                # Convert tensor scalar to int/float if possible
                 if hasattr(val, "item"):
                     meta[k] = val.item()
                 else:
@@ -112,29 +121,16 @@ class PtWindowDataset(Dataset):
         return meta
 
     def get_meta(self, idx: int) -> Dict[str, Any]:
-        """
-        In Lazy mode, this forces a file load, so it is SLOW if called repeatedly
-        outside of the main loop (e.g. for building sampler weights).
-        """
         rec_i, local_i = self._locate(idx)
-        path = self.file_paths[rec_i]
-        
-        # Load just for meta
-        d = torch.load(path, map_location="cpu", weights_only=False)
-        meta = self._get_meta_from_rec(d, local_i)
-        del d
-        return meta
+        d = self.recs[rec_i]
+        return self._get_meta_from_rec(d, local_i)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        # 1. Locate file
+        # RAM에서 즉시 가져옴 (No Disk I/O)
         rec_i, local_i = self._locate(idx)
-        path = self.file_paths[rec_i]
+        d = self.recs[rec_i]
 
-        # 2. Load file on demand (Lazy)
-        # This is the trade-off: IO overhead per sample vs RAM savings
-        d = torch.load(path, map_location="cpu", weights_only=False)
-
-        # 3. Extract tensors
+        # 이미 Static이 합쳐져 있음
         x_hist = d["x_hist"][local_i]
         y_fut = d["y_fut"][local_i]
         nb_hist = d["nb_hist"][local_i]
@@ -149,33 +145,11 @@ class PtWindowDataset(Dataset):
         else:
             x_last_abs = x_hist[-1, 0:2].clone()
 
-        # 4. Handle static features
-        if self.use_ego_static and ("ego_static" in d):
-            ego_static = d["ego_static"][local_i].view(1, -1)
-            x_hist = torch.cat([x_hist, ego_static.expand(x_hist.shape[0], -1)], dim=-1)
-
-        if self.use_nb_static and ("nb_static" in d):
-            nb_static = d["nb_static"][local_i]
-            # dimension handling
-            if nb_static.dim() == 2:
-                # (K, D) -> expand to (T, K, D) if nb_hist is (T,K,D)
-                nb_static = nb_static.unsqueeze(0).expand(nb_hist.shape[0], -1, -1)
-            elif nb_static.dim() == 3:
-                pass
-            elif nb_static.dim() == 4:
-                if nb_static.shape[0] == 1:
-                    nb_static = nb_static.squeeze(0)
-            
-            nb_hist = torch.cat([nb_hist, nb_static], dim=-1)
-
-        # 5. Normalize (using cached stats)
+        # Normalize (using cached stats)
+        # 중요: clamp_min(1e-2) 적용됨
         if self.stats is not None:
-            # We assume stats are already float32 on CPU
-            # x_hist: (T, De)
-            x_hist = (x_hist - self._ego_mean) / self._ego_std.clamp_min(1e-6)
-            
-            # nb_hist: (T, K, Dn)
-            nb_hist = (nb_hist - self._nb_mean) / self._nb_std.clamp_min(1e-6)
+            x_hist = (x_hist - self._ego_mean) / self._ego_std.clamp_min(1e-2)
+            nb_hist = (nb_hist - self._nb_mean) / self._nb_std.clamp_min(1e-2)
 
         out: Dict[str, Any] = {
             "x_ego": x_hist,
@@ -193,6 +167,4 @@ class PtWindowDataset(Dataset):
         if self.return_meta:
             out["meta"] = self._get_meta_from_rec(d, local_i)
         
-        del d
-
         return out

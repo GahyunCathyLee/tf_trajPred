@@ -270,11 +270,11 @@ def main() -> None:
             sampler=sampler,
             shuffle=False,                # sampler 사용 시 shuffle 금지
             num_workers=num_workers,
-            pin_memory=(device.type == "cuda"),
+            pin_memory=True,
             drop_last=True,
-            prefetch_factor=2,
+            prefetch_factor=8,
+            persistent_workers=True,
             collate_fn=collate_batch,
-            persistent_workers=(num_workers > 0),
         )
         print(f"[INFO] Scenario-aware sampling enabled: mode={mode_key} alpha={alpha}")
     else:
@@ -283,10 +283,10 @@ def main() -> None:
             batch_size=batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=(device.type == "cuda"),
+            pin_memory=True,
             drop_last=True,
             collate_fn=collate_batch,
-            prefetch_factor=2,
+            prefetch_factor=8,
             persistent_workers=(num_workers > 0),
         )
         if sam_cfg and labels_lut is None:
@@ -299,7 +299,7 @@ def main() -> None:
         num_workers=num_workers,
         pin_memory=(device.type == "cuda"),
         drop_last=False,
-        prefetch_factor=2,
+        prefetch_factor=8,
         collate_fn=collate_batch,
         persistent_workers=(num_workers > 0),
     )

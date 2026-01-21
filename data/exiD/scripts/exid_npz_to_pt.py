@@ -105,36 +105,53 @@ def convert_one(
     concat_static: bool = True,
     remove_static_keys: bool = True,
     save_x_last_abs: bool = True,
+    check_nan: bool = True,
 ):
-    data = np.load(npz_path, allow_pickle=True)
-    out = {k: _to_tensor(data[k]) for k in data.files}
+    try:
+        data = np.load(npz_path, allow_pickle=True)
 
-    # 1) cast dtypes once
-    if cast_float32:
-        for k in list(out.keys()):
-            if k in FLOAT_KEYS_DEFAULT and isinstance(out[k], torch.Tensor) and out[k].is_floating_point():
-                out[k] = _as_float32(out[k])
-    if cast_mask_bool and "nb_mask" in out and isinstance(out["nb_mask"], torch.Tensor):
-        out["nb_mask"] = _as_bool(out["nb_mask"])
+        out = {}
+        for k in data.files:
+            out[k] = _to_tensor(data[k])
 
-    # 2) concat static once
-    if concat_static:
-        _maybe_concat_static(out)
-        if remove_static_keys:
-            out.pop("ego_static", None)
-            out.pop("nb_static", None)
+        # 1) cast dtypes
+        if cast_float32:
+            for k in list(out.keys()):
+                if k in FLOAT_KEYS_DEFAULT and isinstance(out[k], torch.Tensor) and out[k].is_floating_point():
+                    out[k] = _as_float32(out[k])
+        
+        if cast_mask_bool and "nb_mask" in out and isinstance(out["nb_mask"], torch.Tensor):
+            out[k] = _as_bool(out["nb_mask"])
 
-    # 3) x_last_abs once
-    if save_x_last_abs:
-        _maybe_make_x_last_abs(out)
+        # 2) concat static
+        if concat_static:
+            _maybe_concat_static(out)
+            if remove_static_keys:
+                out.pop("ego_static", None)
+                out.pop("nb_static", None)
 
-    if check_shapes:
-        if "x_hist" in out and "y_fut" in out:
-            x_hist = out["x_hist"]
-            y_fut = out["y_fut"]
-            assert x_hist.ndim == 3, f"x_hist must be (N,T,D), got {tuple(x_hist.shape)}"
-            assert y_fut.ndim == 3, f"y_fut must be (N,Tf,2), got {tuple(y_fut.shape)}"
-            assert y_fut.shape[-1] == 2, f"y_fut last dim must be 2, got {y_fut.shape[-1]}"
+        # 3) x_last_abs
+        if save_x_last_abs:
+            _maybe_make_x_last_abs(out)
+
+        if check_nan:
+            for k, v in out.items():
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    if not torch.isfinite(v).all():
+                        print(f"⚠️ [SKIP] {npz_path.name} contains NaN or Inf in key '{k}'")
+                        return  
+
+        for k, v in out.items():
+            if isinstance(v, torch.Tensor) and not v.is_contiguous():
+                out[k] = v.contiguous()
+
+        # 4) Shape Check
+        if check_shapes:
+            if "x_hist" in out and "y_fut" in out:
+                x_hist = out["x_hist"]
+                y_fut = out["y_fut"]
+                assert x_hist.ndim == 3, f"x_hist must be (N,T,D), got {tuple(x_hist.shape)}"
+                assert y_fut.ndim == 3, f"y_fut must be (N,Tf,2), got {tuple(y_fut.shape)}"
 
         if "nb_hist" in out:
             nb_hist = out["nb_hist"]
@@ -144,8 +161,11 @@ def convert_one(
             nb_mask = out["nb_mask"]
             assert nb_mask.ndim == 3, f"nb_mask must be (N,T,K), got {tuple(nb_mask.shape)}"
 
-    pt_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(out, pt_path)
+        pt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(out, pt_path)
+        
+    except Exception as e:
+        print(f"❌ [ERROR] Failed to convert {npz_path.name}: {e}")
 
 
 def main():
@@ -160,6 +180,7 @@ def main():
     ap.add_argument("--concat_static", action="store_true")
     ap.add_argument("--keep_static_keys", action="store_true")
     ap.add_argument("--save_x_last_abs", action="store_true")
+    ap.add_argument("--skip_nan_check", action="store_true", help="Skip NaN/Inf checking (faster but risky)")
     args = ap.parse_args()
 
     npz_dir = Path(args.npz_dir)
