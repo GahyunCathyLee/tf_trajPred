@@ -30,7 +30,6 @@ exid_49.pt
 exid_52.pt
 exid_53.pt
 exid_54.pt
-exid_55.pt
 exid_57.pt
 exid_59.pt
 exid_62.pt

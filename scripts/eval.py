@@ -290,6 +290,10 @@ def main():
             f"ACC={metrics.get('acc', float('nan')):.6f} "
             f"JERK={metrics.get('jerk', float('nan')):.6f}"
         )
+        
+        # RMSE 출력 포맷팅
+        rmse_str = " ".join([f"RMSE({t}s)={metrics.get(f'rmse_{t}s', float('nan')):.4f}" for t in [1, 2, 3, 4, 5]])
+        print(f"[RESULT] ({target_name}) {rmse_str}")
 
 if __name__ == "__main__":
     main()

@@ -14,6 +14,8 @@ from tqdm import tqdm
 
 import time
 
+import math
+
 from src.metrics import (
     ade, fde, ade_per_sample, fde_per_sample
 )
@@ -181,6 +183,16 @@ def evaluate(
         out = torch.cat([v0, v], dim=1)           # (B,Tf,2)
         return out
 
+    # [수정 1] RMSE 평가를 위한 설정 (1초~5초)
+    eval_horizons_sec = [1, 2, 3, 4, 5]
+    rmse_accum = {t: 0.0 for t in eval_horizons_sec} # 오차 제곱합 누적용
+    rmse_counts = {t: 0 for t in eval_horizons_sec}  # 샘플 개수 누적용
+
+    # Frame Index 계산 함수 (0-based index)
+    # 예: 25Hz일 때 1초 = 25번째 프레임 -> index 24
+    def get_horizon_idx(sec, hz):
+        return int(sec * hz) - 1
+
     pbar = tqdm(loader, desc="val", dynamic_ncols=True, leave=False)
     for batch in pbar:
         x_ego = batch["x_ego"].to(device, non_blocking=True)
@@ -262,6 +274,23 @@ def evaluate(
         sum_acc += float(acc_s.sum().item())
         sum_jerk += float(jerk_s.sum().item())
 
+        # [수정 2] Horizon 별 Squared Error 누적 계산
+        # 전체 시점의 거리 오차(Euclidean distance)를 먼저 구함: (B, Tf)
+        dist_all = torch.norm(pred_abs - y_abs, dim=-1)
+
+        B_curr = int(pred_abs.shape[0])
+        Tf_curr = int(pred_abs.shape[1])
+
+        for sec in eval_horizons_sec:
+            idx = get_horizon_idx(sec, hz)
+            # 예측 길이가 해당 시간(idx)보다 긴 경우에만 계산
+            if 0 <= idx < Tf_curr:
+                # 해당 시점의 오차 (B,)
+                d_t = dist_all[:, idx]
+                # 제곱합 누적
+                rmse_accum[sec] += (d_t ** 2).sum().item()
+                rmse_counts[sec] += B_curr
+
         # denominator for matched ratio
         if labels_lut is not None:
             n_total_samples += B
@@ -333,6 +362,29 @@ def evaluate(
     if labels_lut is not None and n_total_samples > 0:
         matched_ratio = float(n_matched / max(1, n_total_samples))
 
+    # [수정 3] 최종 RMSE 계산
+    results = {
+        "loss": float(overall_loss),
+        "ade": float(overall_ade),
+        "fde": float(overall_fde),
+        "vel": float(overall_vel),
+        "acc": float(overall_acc),
+        "jerk": float(overall_jerk),
+        "n_samples": int(n_samples),
+        "matched": int(n_matched) if labels_lut is not None else -1,
+        "matched_ratio": float(matched_ratio),
+    }
+
+    # RMSE 결과를 results 딕셔너리에 추가
+    for sec in eval_horizons_sec:
+        total_se = rmse_accum[sec]
+        count = rmse_counts[sec]
+        if count > 0:
+            rmse_val = math.sqrt(total_se / count)
+        else:
+            rmse_val = float('nan') # 해당 시간대 데이터가 없거나 예측 길이가 짧음
+        results[f"rmse_{sec}s"] = rmse_val
+
     # -------------------------
     # Save per-label CSV (event/state)
     # - weighted_* 제거
@@ -395,18 +447,7 @@ def evaluate(
             header = not save_state_path.exists()
             df_row.to_csv(save_state_path, mode="a", header=header, index=False)
 
-    return {
-        "loss": float(overall_loss),
-        "ade": float(overall_ade),
-        "fde": float(overall_fde),
-        "vel": float(overall_vel),
-        "acc": float(overall_acc),
-        "jerk": float(overall_jerk),
-        "n_samples": int(n_samples),
-
-        "matched": int(n_matched) if labels_lut is not None else -1,
-        "matched_ratio": float(matched_ratio),
-    }
+    return results
 
 
 def train_one_epoch(
