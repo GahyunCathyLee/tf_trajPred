@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# scripts/eval.py
 from __future__ import annotations
 
 import argparse
@@ -17,7 +18,7 @@ from src.models.build import build_model
 from src.utils import set_seed, resolve_path, resolve_data_paths
 from src.stats import compute_stats_if_needed, load_stats_npz_strict, assert_stats_match_batch_dims, make_stats_filename
 from src.log import log_eval_to_csv
-from src.engine import evaluate                                 
+from src.engine import evaluate
 from src.scenarios import load_window_labels_csv
 
 def print_env_info(device: torch.device):
@@ -230,7 +231,6 @@ def main():
         )
 
         # 결과 파일 이름 조정 (덮어쓰기 방지)
-        # 예: result_per_event.csv -> result_per_event_exid_only.csv
         curr_save_event = None
         if args.save_event_csv:
              p = Path(args.save_event_csv)
@@ -284,14 +284,13 @@ def main():
             )
             print(f"[OK] appended to: {csv_out} (mode={target_name})")
 
-        print(f"[RESULT] ({target_name}) loss={metrics['loss']:.6f} ADE={metrics['ade']:.6f} FDE={metrics['fde']:.6f}")
+        print(f"[RESULT] ({target_name}) loss={metrics['loss']:.6f} ADE={metrics['ade']:.6f} FDE={metrics['fde']:.6f} RMSE={metrics.get('rmse', float('nan')):.6f}")
         print(  
             f"[RESULT] ({target_name}) VEL={metrics.get('vel', float('nan')):.6f} "
             f"ACC={metrics.get('acc', float('nan')):.6f} "
             f"JERK={metrics.get('jerk', float('nan')):.6f}"
         )
         
-        # RMSE 출력 포맷팅
         rmse_str = " ".join([f"RMSE({t}s)={metrics.get(f'rmse_{t}s', float('nan')):.4f}" for t in [1, 2, 3, 4, 5]])
         print(f"[RESULT] ({target_name}) {rmse_str}")
 

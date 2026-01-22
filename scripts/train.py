@@ -32,7 +32,7 @@ def main() -> None:
     # -------------------------
     # mode / seed / device
     # -------------------------
-    mode = str(cfg.get("data", {}).get("mode", "exid")).lower()  # exid | highd | combined
+    mode = str(cfg.get("data", {}).get("mode", "exid")).lower()
     if mode not in ("exid", "highd", "combined"):
         raise ValueError(f"data.mode must be one of exid/highd/combined, got: {mode}")
 
@@ -197,7 +197,7 @@ def main() -> None:
             return_meta=True,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
-            dataset_name="highd",
+            dataset_name="exid",
         )
         train_ds = ConcatDataset([exid_train, highd_train])
 
@@ -242,13 +242,12 @@ def main() -> None:
     use_scenario_sampling = bool(sam_cfg and labels_lut is not None)
 
     if use_scenario_sampling:
-        mode_key = str(sam_cfg.get("mode", "event")).lower()   # "event" or "state"
-        alpha = float(sam_cfg.get("alpha", 0.5))              # 0.5 recommended start
+        mode_key = str(sam_cfg.get("mode", "event")).lower()
+        alpha = float(sam_cfg.get("alpha", 0.5))
         unknown_w = float(sam_cfg.get("unknown_weight", 0.0))
         clip_max = sam_cfg.get("clip_max", None)
         clip_max = float(clip_max) if clip_max is not None else None
 
-        # build per-index weights (requires train_ds return_meta=True)
         weights = build_sample_weights(
             train_ds, labels_lut,
             mode=("event" if mode_key == "event" else "state"),
@@ -260,15 +259,15 @@ def main() -> None:
 
         sampler = WeightedRandomSampler(
             weights=weights,
-            num_samples=len(train_ds),     # epoch당 샘플 수
-            replacement=True               # 중요: True
+            num_samples=len(train_ds),
+            replacement=True
         )
 
         train_loader = DataLoader(
             train_ds,
             batch_size=batch_size,
             sampler=sampler,
-            shuffle=False,                # sampler 사용 시 shuffle 금지
+            shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
             drop_last=True,
@@ -331,28 +330,22 @@ def main() -> None:
     total_steps = epochs * max(1, len(train_loader))
     scheduler = build_scheduler(optimizer, total_steps, warmup_steps, lr_schedule)
 
-    monitor = str(cfg.get("train", {}).get("monitor", "val_loss")).lower()  # val_loss | val_ade
+    monitor = str(cfg.get("train", {}).get("monitor", "val_loss")).lower()
     best = float("inf")
     global_step = 0
 
     print("==== Train ====")
     print(f"mode        : {mode}")
     print(f"tag         : {tag}")
-    print(f"exid_pt_dir : {exid_pt_dir}")
-    print(f"highd_pt_dir: {highd_pt_dir}")
-    print(f"exid_splits : {exid_splits_dir}")
-    print(f"highd_splits: {highd_splits_dir}")
-    print(f"stats_path  : {stats_path}")
     print(f"ckpt_dir    : {ckpt_dir}")
-    print(f"epochs      : {epochs}  bs={batch_size}  workers={num_workers}")
-    print(f"use_amp     : {use_amp}  predict_delta={predict_delta}")
-    print(f"monitor     : {monitor}  lr_schedule={lr_schedule} warmup_steps={warmup_steps}")
+    print(f"epochs      : {epochs}  bs={batch_size}")
+    print(f"monitor     : {monitor}")
 
     # -------------------------
     # training loop
     # -------------------------
     for ep in range(1, epochs + 1):
-        print(f"\n===== Epoch {ep}/{epochs} =====")
+        print(f"\\n===== Epoch {ep}/{epochs} =====")
 
         tr = train_one_epoch(
             model=model,
@@ -393,11 +386,29 @@ def main() -> None:
 
         print(
             f"[epoch {ep}] "
-            f"train: loss={tr['loss']:.4f} ADE={tr['ade']:.3f} FDE={tr['fde']:.3f} | "
-            f"val: loss={va['loss']:.4f} ADE={va['ade']:.3f} FDE={va['fde']:.3f}"
+            f"train: loss={tr['loss']:.4f} ADE={tr['ade']:.3f} | "
+            f"val: loss={va['loss']:.4f} ADE={va['ade']:.3f} RMSE={va['rmse']:.3f} FDE={va['fde']:.3f}"
         )
+        
+        # [수정] Monitor Selection Logic
+        if monitor == "val_loss":
+            score = va["loss"]
+        elif monitor == "val_ade":
+            score = va["ade"]
+        elif monitor == "val_rmse":
+            score = va["rmse"]
+        elif monitor == "val_fde":
+            score = va["fde"]
+        else:
+            # support keys like "val_rmse_3s" -> "rmse_3s"
+            key = monitor.replace("val_", "")
+            if key in va:
+                score = va[key]
+            else:
+                # fallback
+                score = va["loss"]
+                print(f"[WARN] Monitor '{monitor}' metric not found in validation results. Fallback to val_loss.")
 
-        score = va["loss"] if monitor == "val_loss" else va["ade"]
         is_best = score < best
         if is_best:
             best = score
@@ -432,9 +443,8 @@ def main() -> None:
             )
             print(f"✅[CKPT] best -> {best_path} ({monitor}={best:.4f})")
 
-    print("\n[DONE] Training finished.")
+    print("\\n[DONE] Training finished.")
     print(f"Best {monitor}: {best:.4f}")
-    print(f"Best ckpt: {ckpt_dir / 'best.pt'}")
 
 
 if __name__ == "__main__":
