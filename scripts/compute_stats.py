@@ -263,22 +263,37 @@ def main() -> None:
     
     threshold = 1e-3 
     
+    # ---------------------------------------------------------
+    # Low Variance Feature 처리
+    # ---------------------------------------------------------
+    print("\n[INSPECTION] Checking and FIXING dangerous low-variance features...")
+    
+    # 1. Ego Features 처리
     low_std_ego_indices = np.where(ego_std < threshold)[0]
     if len(low_std_ego_indices) > 0:
-        print(f"⚠️ WARNING: Ego features with extremely low std (< {threshold}):")
+        print(f"⚠️  WARNING: Found {len(low_std_ego_indices)} Ego features with low std. Forcing mean=0, std=1.")
         for idx in low_std_ego_indices:
-            print(f"  - Dim {idx}: std={ego_std[idx]:.6f}, mean={ego_mean[idx]:.6f}")
+            # 학습 데이터에 값이 거의 없거나(all zeros), one-hot이라 분산이 작음
+            # -> 정규화를 끄기 위해 mean=0, std=1로 덮어씌움
+            old_m, old_s = ego_mean[idx], ego_std[idx]
+            ego_mean[idx] = 0.0
+            ego_std[idx]  = 1.0
+            print(f"    - Fixed Ego Dim {idx}: (mean={old_m:.6f}, std={old_s:.6f}) -> (mean=0.0, std=1.0)")
             
+    # 2. Neighbor Features 처리
     low_std_nb_indices = np.where(nb_std < threshold)[0]
     if len(low_std_nb_indices) > 0:
-        print(f"⚠️ WARNING: Neighbor features with extremely low std (< {threshold}):")
+        print(f"⚠️  WARNING: Found {len(low_std_nb_indices)} Nb features with low std. Forcing mean=0, std=1.")
         for idx in low_std_nb_indices:
-            print(f"  - Dim {idx}: std={nb_std[idx]:.6f}, mean={nb_mean[idx]:.6f}")
+            old_m, old_s = nb_mean[idx], nb_std[idx]
+            nb_mean[idx] = 0.0
+            nb_std[idx]  = 1.0
+            print(f"    - Fixed Nb Dim {idx}: (mean={old_m:.6f}, std={old_s:.6f}) -> (mean=0.0, std=1.0)")
 
     if len(low_std_ego_indices) == 0 and len(low_std_nb_indices) == 0:
         print("✅ All features have safe variance levels.")
     else:
-        print("💡 SUGGESTION: Increase clamp_min in pt_dataset.py or remove these features.")
+        print("✅ Fixed low-variance features to skip normalization.")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
