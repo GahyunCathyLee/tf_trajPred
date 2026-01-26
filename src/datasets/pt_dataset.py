@@ -16,7 +16,7 @@ class PtWindowDataset(Dataset):
     def __init__(
         self,
         data_dir: Path,
-        split_txt: Path,
+        split_txt: Optional[Path] = None, # [변경] Optional로 변경
         stats: Optional[Dict[str, torch.Tensor]] = None,
         return_meta: bool = False,
         use_ego_static: bool = True,
@@ -30,7 +30,6 @@ class PtWindowDataset(Dataset):
         self.use_nb_static = use_nb_static
         self.dataset_name = dataset_name
 
-        # ---- cache stats as float32 ONCE ----
         if self.stats is not None:
             self._ego_mean = self.stats["ego_mean"].to(torch.float32)
             self._ego_std = self.stats["ego_std"].to(torch.float32)
@@ -40,15 +39,21 @@ class PtWindowDataset(Dataset):
             self._ego_mean = self._ego_std = None
             self._nb_mean = self._nb_std = None
 
-        if not split_txt.exists():
-             raise FileNotFoundError(f"Split file not found: {split_txt}")
-             
-        names = [ln.strip() for ln in split_txt.read_text().splitlines() if ln.strip()]
-        self.file_paths = [self.data_dir / n for n in names]
-
-        missing = [str(p) for p in self.file_paths if not p.exists()]
-        if missing:
-            raise FileNotFoundError("Missing files in split:\n" + "\n".join(missing))
+        if split_txt is None:
+            print(f"[INFO] split_txt is None. Loading all .pt files from {self.data_dir}...")
+            self.file_paths = sorted(list(self.data_dir.glob("*.pt")))
+            if not self.file_paths:
+                raise FileNotFoundError(f"No .pt files found in {self.data_dir}")
+        else:
+            if not split_txt.exists():
+                 raise FileNotFoundError(f"Split file not found: {split_txt}")
+            
+            names = [ln.strip() for ln in split_txt.read_text().splitlines() if ln.strip()]
+            self.file_paths = [self.data_dir / n for n in names]
+            
+            missing = [str(p) for p in self.file_paths if not p.exists()]
+            if missing:
+                raise FileNotFoundError("Missing files in split:\n" + "\n".join(missing))
 
         # ---- Load All Data into RAM ----
         self.recs: List[Dict[str, torch.Tensor]] = []
@@ -58,20 +63,20 @@ class PtWindowDataset(Dataset):
         
         # tqdm으로 로딩 진행 상황 표시
         for p in tqdm(self.file_paths, desc="Loading Dataset"):
-            # 여기서 데이터를 전부 RAM에 올림
             d = torch.load(p, map_location="cpu", weights_only=False)
             
             # Shape Check & Pre-processing
             if "x_hist" not in d:
                  raise KeyError(f"{p.name} missing key 'x_hist'")
             
-            # Static Features Concatenation (미리 합쳐둠)
+            # Static Features Concatenation
             x_hist = d["x_hist"]
             nb_hist = d["nb_hist"]
 
             if self.use_ego_static and ("ego_static" in d):
-                ego_static = d["ego_static"].view(1, -1)
-                x_hist = torch.cat([x_hist, ego_static.expand(x_hist.shape[0], -1)], dim=-1)
+                ego_static = d["ego_static"].view(1, 1, -1)
+                ego_static = ego_static.expand(x_hist.shape[0], x_hist.shape[1], -1)
+                x_hist = torch.cat([x_hist, ego_static], dim=-1)    
                 
             if self.use_nb_static and ("nb_static" in d):
                 nb_static = d["nb_static"]
@@ -81,7 +86,6 @@ class PtWindowDataset(Dataset):
                     nb_static = nb_static.squeeze(0)
                 nb_hist = torch.cat([nb_hist, nb_static], dim=-1)
 
-            # 덮어쓰기 (메모리 절약)
             d["x_hist"] = x_hist
             d["nb_hist"] = nb_hist
 
@@ -126,11 +130,9 @@ class PtWindowDataset(Dataset):
         return self._get_meta_from_rec(d, local_i)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        # RAM에서 즉시 가져옴 (No Disk I/O)
         rec_i, local_i = self._locate(idx)
         d = self.recs[rec_i]
 
-        # 이미 Static이 합쳐져 있음
         x_hist = d["x_hist"][local_i]
         y_fut = d["y_fut"][local_i]
         nb_hist = d["nb_hist"][local_i]
@@ -146,7 +148,6 @@ class PtWindowDataset(Dataset):
             x_last_abs = x_hist[-1, 0:2].clone()
 
         # Normalize (using cached stats)
-        # 중요: clamp_min(1e-2) 적용됨
         if self.stats is not None:
             x_hist = (x_hist - self._ego_mean) / self._ego_std.clamp_min(1e-2)
             nb_hist = (nb_hist - self._nb_mean) / self._nb_std.clamp_min(1e-2)

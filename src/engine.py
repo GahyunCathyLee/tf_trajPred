@@ -15,11 +15,8 @@ from tqdm import tqdm
 import time
 import math
 
-# [수정] 자기 자신을 import하는 잘못된 구문 삭제됨
-# from src.engine import evaluate as original_evaluate  <-- 이 줄이 문제였습니다.
-
 from src.metrics import (
-    ade, fde, ade_per_sample, fde_per_sample
+    ade, fde, ade_per_sample, fde_per_sample, delta_to_abs
 )
 from src.losses import trajectory_loss, multimodal_loss
 from src.utils import _to_int, measure_latency_ms
@@ -35,8 +32,9 @@ def evaluate(
     device: torch.device,
     use_amp: bool,
     predict_delta: bool,
-    w_traj: float,
+    w_ade: float,
     w_fde: float,
+    w_rmse: float,
     w_cls: float,
     data_hz: float,
     labels_lut=None,
@@ -62,8 +60,6 @@ def evaluate(
     sum_vel = 0.0
     sum_acc = 0.0
     sum_jerk = 0.0
-    
-    # [RMSE 추가] 전체 제곱오차 합 및 포인트 수
     sum_se_total = 0.0
     n_points_total = 0
 
@@ -112,7 +108,7 @@ def evaluate(
             return None
 
         lat = measure_latency_ms(fn=_one_infer, device=device, iters=latency_iters, warmup=latency_warmup)
-        # Latency print 생략 (필요 시 복구 가능)
+        print("Inference Latency: ", lat, " ms")
 
     def _kin_err_per_sample(pred_kin: torch.Tensor, gt_kin: torch.Tensor) -> torch.Tensor:
         e = torch.norm(pred_kin - gt_kin, dim=-1)
@@ -156,7 +152,7 @@ def evaluate(
                 loss, best_idx = multimodal_loss(
                     pred=pred, y_abs=y_abs, x_last_abs=x_last_abs,
                     predict_delta=predict_delta, score_logits=scores,
-                    w_traj=w_traj, w_fde=w_fde, w_cls=w_cls,
+                    w_ade=w_ade, w_fde=w_fde, w_rmse=w_rmse, w_cls=w_cls,
                 )
                 if predict_delta:
                     pred_abs_all = torch.cumsum(pred, dim=2) + x_last_abs[:, None, None, :]
@@ -166,7 +162,7 @@ def evaluate(
             else:
                 loss = trajectory_loss(
                     pred=pred, y_abs=y_abs, x_last_abs=x_last_abs,
-                    predict_delta=predict_delta, w_traj=w_traj, w_fde=w_fde,
+                    predict_delta=predict_delta, w_ade=w_ade, w_fde=w_fde, w_rmse=w_rmse
                 )
                 pred_abs = delta_to_abs(pred, x_last_abs) if predict_delta else pred
 
@@ -349,7 +345,7 @@ def evaluate(
 def train_one_epoch(
     model, loader, device, optimizer, scheduler, scaler,
     use_amp, predict_delta, grad_clip_norm,
-    w_traj, w_fde, w_cls, global_step, log_every, epoch
+    w_ade, w_fde, w_rmse, w_cls, global_step, log_every, epoch
 ):
     model.train()
     total_loss_t = torch.zeros((), device=device)
@@ -378,7 +374,7 @@ def train_one_epoch(
             loss, best_idx = multimodal_loss(
                 pred=pred, y_abs=y_abs, x_last_abs=x_last_abs,
                 predict_delta=predict_delta, score_logits=scores,
-                w_traj=w_traj, w_fde=w_fde, w_cls=w_cls
+                w_ade=w_ade, w_fde=w_fde, w_rmse=w_rmse, w_cls=w_cls
             )
 
         if use_amp and scaler is not None:

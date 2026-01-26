@@ -6,8 +6,9 @@ import argparse
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import numpy as np
 import torch
-from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler, Subset
 from torch.amp import GradScaler
 
 import yaml
@@ -32,7 +33,7 @@ def main() -> None:
     # -------------------------
     # mode / seed / device
     # -------------------------
-    mode = str(cfg.get("data", {}).get("mode", "exid")).lower()
+    mode = str(cfg.get("data", {}).get("mode", "combined")).lower()
     if mode not in ("exid", "highd", "combined"):
         raise ValueError(f"data.mode must be one of exid/highd/combined, got: {mode}")
 
@@ -59,16 +60,18 @@ def main() -> None:
     # -------------------------
     # paths (mode-aware)
     # -------------------------
-
     paths = resolve_data_paths(cfg)
     tag = str(paths.get("tag", "unknown"))
 
     exid_pt_dir = paths.get("exid_pt_dir", Path(f"./data/exiD/data_pt/exid_{tag}"))
     highd_pt_dir = paths.get("highd_pt_dir", Path(f"./data/highD/data_pt/highd_{tag}"))
+    
+    # [수정] 기존 split 파일 경로(stats 계산용)와 새로운 인덱스 파일 경로 분리
     exid_splits_dir = paths.get("exid_splits_dir", Path("./data/exiD/splits"))
     highd_splits_dir = paths.get("highd_splits_dir", Path("./data/highD/splits"))
-    exid_stats_dir = paths.get("exid_stats_dir", Path("./data/exiD/stats"))
-    highd_stats_dir = paths.get("highd_stats_dir", Path("./data/highD/stats"))
+    
+    # [신규] create_splits.py로 생성한 .npy 파일들이 있는 경로
+    splits_index_dir = paths.get("splits_index_dir", Path("./data/splits"))
 
     ckpt_dir = resolve_path(cfg.get("train", {}).get("ckpt_dir", "ckpts"))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -81,16 +84,17 @@ def main() -> None:
 
     # -------------------------
     # stats (subprocess only)
+    # [복원] 기존의 Robust한 통계 계산 로직 복구
     # -------------------------
     stats_split = str(cfg.get("train", {}).get("stats_split", "train"))
     stats_fname = make_stats_filename(tag, use_ego_static, use_nb_static)
 
     if mode == "exid":
-        stats_path=Path("./data/exiD/stats") / stats_fname
+        stats_path = Path("./data/exiD/stats") / stats_fname
         compute_stats_if_needed(
             stats_path=stats_path,
             data_dir=exid_pt_dir,
-            splits_dir=exid_splits_dir,
+            splits_dir=exid_splits_dir, # 기존 split.txt가 있다면 활용 (없어도 무방하도록 stats 내부 로직 확인 필요)
             stats_split="train",
             batch_size=batch_size,
             num_workers=num_workers,
@@ -98,7 +102,7 @@ def main() -> None:
             use_nb_static=use_nb_static,
         )
     elif mode == "highd":
-        stats_path=Path("./data/highD/stats") / stats_fname
+        stats_path = Path("./data/highD/stats") / stats_fname
         compute_stats_if_needed(
             stats_path=stats_path,
             data_dir=highd_pt_dir,
@@ -109,8 +113,11 @@ def main() -> None:
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
         )
-    else:
-        stats_path=Path("./data/combined/stats") / stats_fname
+    else: # combined
+        stats_path = Path("./data/combined/stats") / stats_fname
+        # combined stats 저장 경로 생성
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        
         compute_stats_if_needed(
             stats_path=stats_path,
             data_dir=[exid_pt_dir, highd_pt_dir],
@@ -132,97 +139,76 @@ def main() -> None:
         assert_stats_match_batch_dims(stats, ego_dim_cfg, nb_dim_cfg, stats_path)
 
     # -------------------------
-    # datasets / loaders
+    # datasets Construction (Full Load -> Subset)
+    # [변경] 기존의 split.txt 로딩 방식을 제거하고 전체 로드 후 인덱싱으로 변경
     # -------------------------
-    if mode == "exid":
-        train_split = exid_splits_dir / "train.txt"
-        val_split = exid_splits_dir / "val.txt"
+    print("[INFO] Loading FULL datasets (ignoring split txt)...")
 
-        train_ds = PtWindowDataset(
+    full_ds = None
+    
+    # 1. exiD Full Load
+    ds_exid_full = None
+    if mode in ("exid", "combined"):
+        ds_exid_full = PtWindowDataset(
             data_dir=exid_pt_dir,
-            split_txt=train_split,
+            split_txt=None,  # None -> Load ALL .pt files
             stats=stats,
             return_meta=True,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             dataset_name="exid",
         )
-        val_ds = PtWindowDataset(
-            data_dir=exid_pt_dir,
-            split_txt=val_split,
+    
+    # 2. highD Full Load
+    ds_highd_full = None
+    if mode in ("highd", "combined"):
+        ds_highd_full = PtWindowDataset(
+            data_dir=highd_pt_dir,
+            split_txt=None, # None -> Load ALL .pt files
             stats=stats,
-            return_meta=False,
+            return_meta=True,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
-            dataset_name="exid",
+            dataset_name="highd",
         )
 
+    # 3. Combine
+    if mode == "combined":
+        # create_splits.py에서 순서를 exid -> highd로 맞췄으므로 반드시 순서 유지
+        full_ds = ConcatDataset([ds_exid_full, ds_highd_full])
+        print(f"[INFO] Combined Dataset created (ExiD + HighD). Total: {len(full_ds):,}")
+    elif mode == "exid":
+        full_ds = ds_exid_full
+        print(f"[INFO] ExiD Only Dataset. Total: {len(full_ds):,}")
     elif mode == "highd":
-        train_split = highd_splits_dir / "train.txt"
-        val_split = highd_splits_dir / "val.txt"
+        full_ds = ds_highd_full
+        print(f"[INFO] HighD Only Dataset. Total: {len(full_ds):,}")
 
-        train_ds = PtWindowDataset(
-            data_dir=highd_pt_dir,
-            split_txt=train_split,
-            stats=stats,
-            return_meta=True,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="highd",
-        )
-        val_ds = PtWindowDataset(
-            data_dir=highd_pt_dir,
-            split_txt=val_split,
-            stats=stats,
-            return_meta=False,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="highd",
+    # 4. Load Indices & Create Subsets
+    print(f"[INFO] Loading split indices from {splits_index_dir}...")
+    try:
+        train_idx = np.load(splits_index_dir / "train_indices.npy")
+        val_idx = np.load(splits_index_dir / "val_indices.npy")
+        # test_idx = np.load(splits_index_dir / "test_indices.npy") # 학습 시 필요 없음
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Split indices not found in {splits_index_dir}. Run create_splits.py first.") from e
+
+    # Indices Integrity Check
+    max_idx = np.max(train_idx) if len(train_idx) > 0 else 0
+    if max_idx >= len(full_ds):
+        raise ValueError(
+            f"Index out of bounds! Dataset size={len(full_ds)}, but train_indices max={max_idx}. "
+            "Did you run create_splits.py with the correct dataset mode?"
         )
 
-    else:
-        exid_train = PtWindowDataset(
-            data_dir=exid_pt_dir,
-            split_txt=exid_splits_dir / "train.txt",
-            stats=stats,
-            return_meta=True,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="exid",
-        )
-        highd_train = PtWindowDataset(
-            data_dir=highd_pt_dir,
-            split_txt=highd_splits_dir / "train.txt",
-            stats=stats,
-            return_meta=True,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="exid",
-        )
-        train_ds = ConcatDataset([exid_train, highd_train])
-
-        exid_val = PtWindowDataset(
-            data_dir=exid_pt_dir,
-            split_txt=exid_splits_dir / "val.txt",
-            stats=stats,
-            return_meta=False,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="exid",
-        )
-        highd_val = PtWindowDataset(
-            data_dir=highd_pt_dir,
-            split_txt=highd_splits_dir / "val.txt",
-            stats=stats,
-            return_meta=False,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="highd",
-        )
-        val_ds = ConcatDataset([exid_val, highd_val])
+    # Subset 생성
+    train_ds = Subset(full_ds, train_idx)
+    val_ds = Subset(full_ds, val_idx)
+    
+    print(f"[INFO] Data Split Applied -> Train: {len(train_ds):,}, Val: {len(val_ds):,}")
 
     # -------------------------
-    # scenario labels
+    # scenario labels & Sampling
     # -------------------------
     labels_lut = None
     labels_cfg = cfg.get("data", {}).get("scenario_labels", None)
@@ -241,67 +227,69 @@ def main() -> None:
     sam_cfg = cfg.get("data", {}).get("scenario_sampling", None)
     use_scenario_sampling = bool(sam_cfg and labels_lut is not None)
 
-    if use_scenario_sampling:
-        mode_key = str(sam_cfg.get("mode", "event")).lower()
-        alpha = float(sam_cfg.get("alpha", 0.5))
-        unknown_w = float(sam_cfg.get("unknown_weight", 0.0))
-        clip_max = sam_cfg.get("clip_max", None)
-        clip_max = float(clip_max) if clip_max is not None else None
+    # Common sampler args
+    mode_key = str(sam_cfg.get("mode", "event")).lower() if sam_cfg else "event"
+    alpha = float(sam_cfg.get("alpha", 0.5)) if sam_cfg else 0.5
+    unknown_w = float(sam_cfg.get("unknown_weight", 0.0)) if sam_cfg else 0.0
+    clip_max = sam_cfg.get("clip_max", None) if sam_cfg else None
+    clip_max = float(clip_max) if clip_max is not None else None
 
-        weights = build_sample_weights(
-            train_ds, labels_lut,
+    # [TRAIN Loader Construction]
+    if use_scenario_sampling:
+        print("[INFO] Building TRAIN sample weights...")
+        train_weights = build_sample_weights(
+            train_ds, labels_lut, 
             mode=("event" if mode_key == "event" else "state"),
             alpha=alpha,
             unknown_weight=unknown_w,
             clip_max=clip_max,
-            log = True
+            log=True
         )
-
-        sampler = WeightedRandomSampler(
-            weights=weights,
-            num_samples=len(train_ds),
-            replacement=True
+        train_sampler = WeightedRandomSampler(
+            weights=train_weights, num_samples=len(train_ds), replacement=True
         )
-
         train_loader = DataLoader(
-            train_ds,
-            batch_size=batch_size,
-            sampler=sampler,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True,
-            drop_last=True,
-            prefetch_factor=8,
-            persistent_workers=True,
-            collate_fn=collate_batch,
+            train_ds, batch_size=batch_size, sampler=train_sampler, shuffle=False,
+            num_workers=num_workers, pin_memory=True, drop_last=True,
+            prefetch_factor=8, persistent_workers=True, collate_fn=collate_batch,
         )
-        print(f"[INFO] Scenario-aware sampling enabled: mode={mode_key} alpha={alpha}")
     else:
         train_loader = DataLoader(
-            train_ds,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=True,
-            drop_last=True,
-            collate_fn=collate_batch,
-            prefetch_factor=8,
-            persistent_workers=(num_workers > 0),
+            train_ds, batch_size=batch_size, shuffle=True,
+            num_workers=num_workers, pin_memory=True, drop_last=True,
+            collate_fn=collate_batch, prefetch_factor=8, persistent_workers=(num_workers > 0),
         )
         if sam_cfg and labels_lut is None:
             print("[WARN] scenario_sampling set but labels_lut not loaded -> disabled")
 
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-        drop_last=False,
-        prefetch_factor=8,
-        collate_fn=collate_batch,
-        persistent_workers=(num_workers > 0),
-    )
+    # [VALIDATION Loader Construction] - [변경] Val에도 Sampling 적용
+    if use_scenario_sampling:
+        print("[INFO] Building VALIDATION sample weights (for balanced eval)...")
+        val_weights = build_sample_weights(
+            val_ds, labels_lut,
+            mode=("event" if mode_key == "event" else "state"),
+            alpha=alpha, # Train과 동일한 alpha 사용
+            unknown_weight=unknown_w,
+            clip_max=clip_max,
+            log=True # Validation 분포 로그 출력
+        )
+        val_sampler = WeightedRandomSampler(
+            weights=val_weights, num_samples=len(val_ds), replacement=True
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=batch_size, sampler=val_sampler, shuffle=False,
+            num_workers=num_workers, pin_memory=(device.type == "cuda"),
+            drop_last=False, prefetch_factor=8, collate_fn=collate_batch,
+            persistent_workers=(num_workers > 0),
+        )
+        print("[INFO] Scenario-aware sampling enabled for VALIDATION.")
+    else:
+        val_loader = DataLoader(
+            val_ds, batch_size=batch_size, shuffle=False,
+            num_workers=num_workers, pin_memory=(device.type == "cuda"),
+            drop_last=False, prefetch_factor=8, collate_fn=collate_batch,
+            persistent_workers=(num_workers > 0),
+        )
 
 
     # -------------------------
@@ -317,8 +305,9 @@ def main() -> None:
     scaler = GradScaler("cuda", enabled=use_amp)
 
     predict_delta = bool(cfg.get("model", {}).get("predict_delta", False))
-    w_traj = float(cfg.get("train", {}).get("w_traj", 1.0))
+    w_ade = float(cfg.get("train", {}).get("w_ade", 1.0))
     w_fde = float(cfg.get("train", {}).get("w_fde", 0.0))
+    w_rmse = float(cfg.get("train", {}).get("w_rmse", 0.0))
     w_cls = float(cfg.get("train", {}).get("w_cls", 1.0))
 
     epochs = int(cfg.get("train", {}).get("epochs", 50))
@@ -345,7 +334,7 @@ def main() -> None:
     # training loop
     # -------------------------
     for ep in range(1, epochs + 1):
-        print(f"\\n===== Epoch {ep}/{epochs} =====")
+        print(f"\n===== Epoch {ep}/{epochs} =====")
 
         tr = train_one_epoch(
             model=model,
@@ -357,8 +346,9 @@ def main() -> None:
             use_amp=use_amp,
             predict_delta=predict_delta,
             grad_clip_norm=grad_clip_norm,
-            w_traj=w_traj,
+            w_ade=w_ade,
             w_fde=w_fde,
+            w_rmse=w_rmse,
             w_cls=w_cls,
             global_step=global_step,
             log_every=log_every,
@@ -374,8 +364,9 @@ def main() -> None:
             device=device,
             use_amp=use_amp,
             predict_delta=predict_delta,
-            w_traj=w_traj,
+            w_ade=w_ade,
             w_fde=w_fde,
+            w_rmse=w_rmse,
             w_cls=w_cls,
             labels_lut=(labels_lut if do_strat else None),
             save_event_path=(event_csv if (do_strat and labels_lut is not None) else None),
@@ -390,7 +381,7 @@ def main() -> None:
             f"val: loss={va['loss']:.4f} ADE={va['ade']:.3f} RMSE={va['rmse']:.3f} FDE={va['fde']:.3f}"
         )
         
-        # [수정] Monitor Selection Logic
+        # Monitor Selection Logic
         if monitor == "val_loss":
             score = va["loss"]
         elif monitor == "val_ade":
@@ -400,14 +391,8 @@ def main() -> None:
         elif monitor == "val_fde":
             score = va["fde"]
         else:
-            # support keys like "val_rmse_3s" -> "rmse_3s"
             key = monitor.replace("val_", "")
-            if key in va:
-                score = va[key]
-            else:
-                # fallback
-                score = va["loss"]
-                print(f"[WARN] Monitor '{monitor}' metric not found in validation results. Fallback to val_loss.")
+            score = va.get(key, va["loss"])
 
         is_best = score < best
         if is_best:
@@ -443,7 +428,7 @@ def main() -> None:
             )
             print(f"✅[CKPT] best -> {best_path} ({monitor}={best:.4f})")
 
-    print("\\n[DONE] Training finished.")
+    print("\n[DONE] Training finished.")
     print(f"Best {monitor}: {best:.4f}")
 
 

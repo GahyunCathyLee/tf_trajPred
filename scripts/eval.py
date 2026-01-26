@@ -230,7 +230,6 @@ def main():
             persistent_workers=(num_workers > 0),
         )
 
-        # 결과 파일 이름 조정 (덮어쓰기 방지)
         curr_save_event = None
         if args.save_event_csv:
              p = Path(args.save_event_csv)
@@ -247,9 +246,10 @@ def main():
             device=device,
             use_amp=bool(args.use_amp),
             predict_delta=predict_delta,
-            w_traj=float(loss_cfg.get("w_traj", 1.0)),
-            w_fde=float(loss_cfg.get("w_fde", 1.0)),
-            w_cls=float(loss_cfg.get("w_cls", 1.0)),
+            w_ade=float(loss_cfg.get("w_ade", 1.0)),
+            w_fde=float(loss_cfg.get("w_fde", 0.0)),
+            w_cls=float(loss_cfg.get("w_cls", 0.5)),
+            w_rmse=float(loss_cfg.get("w_rmse", 0.0)),
             data_hz=data_hz,
             labels_lut=labels_lut,
             save_event_path=curr_save_event,

@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, List, Tuple, Literal
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, Subset # [추가] Subset 임포트
 
 from pathlib import Path
 
@@ -74,10 +74,17 @@ def _extract_key_from_meta(meta: Dict[str, Any]):
         return None
 
 def _get_meta_fast(dataset, i: int):
-    # 1) direct
+    # 1) direct (PtWindowDataset 등)
     if hasattr(dataset, "get_meta"):
         return dataset.get_meta(i)
 
+    # 2) Subset 처리 [추가된 부분]
+    # Subset은 .dataset(부모)과 .indices(맵핑)를 가짐. 재귀적으로 호출.
+    if isinstance(dataset, Subset):
+        real_idx = dataset.indices[i]
+        return _get_meta_fast(dataset.dataset, real_idx)
+
+    # 3) ConcatDataset 처리
     if isinstance(dataset, ConcatDataset):
         if not hasattr(dataset, "_cached_meta_router"):
             cum = np.asarray(dataset.cumulative_sizes, dtype=np.int64)
@@ -91,12 +98,10 @@ def _get_meta_fast(dataset, i: int):
         j = int(ds_id[i])
         li = int(local[i])
         sub = dataset.datasets[j]
-        if hasattr(sub, "get_meta"):
-            return sub.get_meta(li)
-        item = sub[li]
-        return item.get("meta", None)
+        # 재귀 호출로 내부가 Subset이어도 처리 가능
+        return _get_meta_fast(sub, li)
 
-    # 3) fallback
+    # 4) fallback (느리지만 확실한 방법)
     item = dataset[i]
     return item.get("meta", None)
 
@@ -123,6 +128,7 @@ def build_sample_weights(
     """
     labels = []
 
+    # 전체 데이터셋 순회 (Subset인 경우 len은 Subset 크기)
     for i in range(len(dataset)):
         meta = _get_meta_fast(dataset, i)
 
