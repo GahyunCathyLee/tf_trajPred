@@ -147,6 +147,12 @@ def build_sample_weights(
             continue
 
         lab = rec.get("event_label" if mode == "event" else "state_label", None)
+
+        if mode == "event":
+            s_lab = str(lab) if lab is not None else "unknown"
+            if s_lab in ["simple_lane_change", "lane_change_other"]:
+                lab = "lane_change"
+
         if lab is None:
             lab = "unknown"
 
