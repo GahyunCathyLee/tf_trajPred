@@ -6,3 +6,4 @@ torch>=2.1
 tqdm>=4.66
 pyyaml>=6.0
 pandas
+scikit-learn
