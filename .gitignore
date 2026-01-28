@@ -4,5 +4,6 @@ ckpts/
 *.pt
 *.csv
 *.yaml
+*.npy
 
 __pycache__/
