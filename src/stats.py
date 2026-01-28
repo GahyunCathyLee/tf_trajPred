@@ -21,6 +21,52 @@ def load_stats_npz_strict(stats_path: Path) -> Dict[str, torch.Tensor]:
             raise RuntimeError(f"[STATS] missing key '{k}' in {stats_path}")
     return stats
 
+def load_stats_for_ablation(
+    stats_dir: Path, 
+    use_ego_static: bool, 
+    use_nb_static: bool, 
+    use_neighbors: bool
+) -> Optional[Dict[str, torch.Tensor]]:
+    """
+    Ablation Config에 따라 Dynamic/Static 통계를 조립하여 반환.
+    """
+    stats_path = stats_dir / "stats.npz"
+    if not stats_path.exists():
+        return None
+
+    d = np.load(str(stats_path))
+    
+    # 1. Ego Stats
+    ego_mean = torch.from_numpy(d["dyn_ego_mean"])
+    ego_std = torch.from_numpy(d["dyn_ego_std"])
+    
+    if use_ego_static and "stat_ego_mean" in d:
+        es_mean = torch.from_numpy(d["stat_ego_mean"])
+        es_std = torch.from_numpy(d["stat_ego_std"])
+        ego_mean = torch.cat([ego_mean, es_mean], dim=0)
+        ego_std = torch.cat([ego_std, es_std], dim=0)
+
+    # 2. Neighbor Stats
+    nb_mean = None
+    nb_std = None
+    
+    if use_neighbors:
+        nb_mean = torch.from_numpy(d["dyn_nb_mean"])
+        nb_std = torch.from_numpy(d["dyn_nb_std"])
+        
+        if use_nb_static and "stat_nb_mean" in d:
+            ns_mean = torch.from_numpy(d["stat_nb_mean"])
+            ns_std = torch.from_numpy(d["stat_nb_std"])
+            nb_mean = torch.cat([nb_mean, ns_mean], dim=0)
+            nb_std = torch.cat([nb_std, ns_std], dim=0)
+
+    return {
+        "ego_mean": ego_mean,
+        "ego_std": ego_std,
+        "nb_mean": nb_mean,
+        "nb_std": nb_std
+    }
+
 def make_stats_filename(tag: str, use_ego_static: bool, use_nb_static: bool) -> str:
     """
     Naming rule:
