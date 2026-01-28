@@ -370,23 +370,37 @@ def main() -> None:
         else: score = va.get(monitor.replace("val_", ""), va["loss"])
 
         is_best = score < best
-        if is_best: best = score
+        if is_best: 
+            best = score
 
-        torch.save({
-            "epoch": ep, "global_step": global_step, "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(), "cfg": cfg, "best_monitor": best,
-        }, ckpt_dir / "last.pt")
+        # 1. 공통 저장 데이터 구성
+        save_dict = {
+            "epoch": ep, 
+            "global_step": global_step, 
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(), 
+            "cfg": cfg, 
+            "best_monitor": best,
+        }
 
+        # 2. last.pt 저장
+        torch.save(save_dict, ckpt_dir / "last.pt")
+
+        # 3. best.pt 저장 
         if is_best:
             best_path = ckpt_dir / "best.pt"
-            torch.save({
-                "epoch": ep, "global_step": global_step, "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(), "cfg": cfg, "best_monitor": best,
-            }, best_path)
+            torch.save(save_dict, best_path)
             print(f"✅[CKPT] best -> {best_path} ({monitor}={best:.4f})")
+
+        # 4. 100 epoch 단위 best 저장 (추가된 부분)
+        if ep % 100 == 0:
+            interval_best_path = ckpt_dir / f"best_{ep}.pt"
+            torch.save(torch.load(ckpt_dir / "best.pt"), interval_best_path)
+            print(f"💾[INTERVAL] Saved best model up to epoch {ep} as {interval_best_path.name}")
 
     print("\n[DONE] Training finished.")
     print(f"Best {monitor}: {best:.4f}")
+    print(f"{best_path}")
 
 
 if __name__ == "__main__":
