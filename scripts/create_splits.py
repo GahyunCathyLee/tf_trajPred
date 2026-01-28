@@ -8,8 +8,8 @@ from pathlib import Path
 # 설정
 # =========================================================
 LABEL_FILE_MAP = {
-    "exid": "./data/exiD/data_pt/exid_T2_Tf5_hz3/window_labels.csv" ,
-    "highd": "./data/highD/data_pt/highd_T2_Tf5_hz3/window_labels.csv"
+    "exid": "./data/exiD/data_mmap/exid_T2_Tf5_hz3/window_labels.csv",
+    "highd": "./data/highD/data_mmap/highd_T2_Tf5_hz3/window_labels.csv"
 }
 
 OUTPUT_DIR_MAP = {
