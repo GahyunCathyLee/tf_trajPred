@@ -70,11 +70,22 @@ def log_eval_to_csv(
         "loss": _safe_float(metrics.get("loss")),
         "ade": _safe_float(metrics.get("ade")),
         "fde": _safe_float(metrics.get("fde")),
+        # [NEW] Add RMSE logging
+        "rmse": _safe_float(metrics.get("rmse")),
+        "rmse_1s": _safe_float(metrics.get("rmse_1s")),
+        "rmse_2s": _safe_float(metrics.get("rmse_2s")),
+        "rmse_3s": _safe_float(metrics.get("rmse_3s")),
+        "rmse_4s": _safe_float(metrics.get("rmse_4s")),
+        "rmse_5s": _safe_float(metrics.get("rmse_5s")),
+        
         "vel": _safe_float(metrics.get("vel")),
         "acc": _safe_float(metrics.get("acc")),
         "jerk": _safe_float(metrics.get("jerk")),
 
         "matched_ratio": _safe_float(metrics.get("matched_ratio")),
+        
+        # [NEW] Latency per sample
+        "latency_ms": _safe_float(metrics.get("latency_ms")),
     }
 
     df = pd.DataFrame([row])

@@ -1,3 +1,4 @@
+# src/engine.py
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -8,7 +9,7 @@ import pandas as pd
 from collections import defaultdict
 
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Any, Optional
 
 from tqdm import tqdm
 
@@ -45,6 +46,9 @@ def evaluate(
     latency_iters: int = 200,
     latency_warmup: int = 30,
     latency_per_sample: bool = True,
+    # [설명] Stratified CSV에 경로를 기록하기 위해 인자로 받습니다.
+    cfg_path: Path | str = "unknown",
+    ckpt_path: Path | str = "unknown",
 ) -> Dict[str, float]:
     model.eval()
 
@@ -60,55 +64,77 @@ def evaluate(
     sum_vel = 0.0
     sum_acc = 0.0
     sum_jerk = 0.0
-    sum_se_total = 0.0
+    
+    # [설명] RMSE의 정확한 계산을 위해 Squared Error 합을 누적합니다.
+    sum_se_total = 0.0 
     n_points_total = 0
 
     n_samples = 0
 
     # Stratified accumulators
-    ev_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0])
-    st_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0])
+    # Index: 0:ADE, 1:FDE, 2:Vel, 3:Acc, 4:Jerk, 5:SE(Squared Error for RMSE), 6:Count
+    ev_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0])
+    st_stats = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0])
     n_matched = 0
     n_total_samples = 0 
 
     hz = float(data_hz)
 
+    # -------------------------
     # Latency measurement
+    # -------------------------
+    lat_results = {}
     if measure_latency:
-        first = next(iter(loader))
-        x_ego_l = first["x_ego"].to(device, non_blocking=True)
-        x_nb_l = first["x_nb"].to(device, non_blocking=True)
-        nb_mask_l = first["nb_mask"].to(device, non_blocking=True)
-        x_last_abs_l = first["x_last_abs"].to(device, non_blocking=True)
-        B_lat = int(x_ego_l.shape[0])
+        try:
+            # Latency 측정을 위한 더미 데이터 가져오기
+            first = next(iter(loader))
+            x_ego_l = first["x_ego"].to(device, non_blocking=True)
+            x_nb_l = first["x_nb"].to(device, non_blocking=True)
+            nb_mask_l = first["nb_mask"].to(device, non_blocking=True)
+            x_last_abs_l = first["x_last_abs"].to(device, non_blocking=True)
+            B_lat = int(x_ego_l.shape[0])
 
-        def _one_infer():
-            with autocast(device_type="cuda", enabled=use_amp):
-                out = model(x_ego_l, x_nb_l, nb_mask_l)
-                if isinstance(out, (tuple, list)):
-                    pred, scores = out
-                else:
-                    pred, scores = out, None
-                
-                if pred.dim() == 4:
-                    if scores is not None:
-                        best_idx = torch.argmax(scores, dim=1)
+            def _one_infer():
+                with autocast(device_type="cuda", enabled=use_amp):
+                    out = model(x_ego_l, x_nb_l, nb_mask_l)
+                    if isinstance(out, (tuple, list)):
+                        pred, scores = out
                     else:
-                        best_idx = torch.zeros(pred.shape[0], device=pred.device, dtype=torch.long)
-                    if predict_delta:
-                        pred_abs_all = torch.cumsum(pred, dim=2) + x_last_abs_l[:, None, None, :]
-                    else:
-                        pred_abs_all = pred
-                    _ = pred_abs_all[torch.arange(pred.shape[0], device=pred.device), best_idx]
-                else:
-                    if predict_delta:
-                        _ = torch.cumsum(pred, dim=1) + x_last_abs_l[:, None, :]
-                    else:
-                        _ = pred
-            return None
+                        pred, scores = out, None
+                    
+                    if pred.dim() == 4: # Multi-modal
+                        if scores is not None:
+                            best_idx = torch.argmax(scores, dim=1)
+                        else:
+                            best_idx = torch.zeros(pred.shape[0], device=pred.device, dtype=torch.long)
+                        if predict_delta:
+                            pred_abs_all = torch.cumsum(pred, dim=2) + x_last_abs_l[:, None, None, :]
+                        else:
+                            pred_abs_all = pred
+                        _ = pred_abs_all[torch.arange(pred.shape[0], device=pred.device), best_idx]
+                    else: # Single-modal
+                        if predict_delta:
+                            _ = torch.cumsum(pred, dim=1) + x_last_abs_l[:, None, :]
+                        else:
+                            _ = pred
+                return None
 
-        lat = measure_latency_ms(fn=_one_infer, device=device, iters=latency_iters, warmup=latency_warmup)
-        print("Inference Latency: ", lat, " ms")
+            # warm-up and measure
+            lat = measure_latency_ms(fn=_one_infer, device=device, iters=latency_iters, warmup=latency_warmup)
+            
+            avg_ms = lat.get('avg_ms', float('nan'))
+            p50 = lat.get('p50_ms', float('nan'))
+            p99 = lat.get('p99_ms', float('nan'))
+            
+            # [수정] Sample당 Latency 계산
+            per_sample_avg = avg_ms / B_lat if B_lat > 0 else float('nan')
+            
+            print(f"[Lat] Batch({B_lat}): {avg_ms:.2f}ms | Sample: {per_sample_avg:.4f}ms | P50: {p50:.2f}ms | P99: {p99:.2f}ms")
+            
+            lat_results['latency_ms'] = per_sample_avg
+        except StopIteration:
+            print("[WARN] DataLoader is empty, skipping latency measure.")
+            lat_results['latency_ms'] = float('nan')
 
     def _kin_err_per_sample(pred_kin: torch.Tensor, gt_kin: torch.Tensor) -> torch.Tensor:
         e = torch.norm(pred_kin - gt_kin, dim=-1)
@@ -188,14 +214,15 @@ def evaluate(
         sum_acc += float(acc_s.sum().item())
         sum_jerk += float(jerk_s.sum().item())
 
-        # [RMSE 계산]
+        # [RMSE 계산 1] Overall RMSE를 위해 전체 포인트 제곱합 누적
         dist_all = torch.norm(pred_abs - y_abs, dim=-1) # (B, Tf)
-        
-        # 1. Overall RMSE (모든 time step 포함)
         sum_se_total += (dist_all ** 2).sum().item()
         n_points_total += dist_all.numel()
+        
+        # [RMSE 계산 2] Stratified RMSE를 위해 샘플별 MSE 누적
+        mse_s = (dist_all ** 2).mean(dim=1) # (B,)
 
-        # 2. Horizon별 RMSE
+        # [RMSE 계산 3] Horizon별 RMSE
         B_curr = int(pred_abs.shape[0])
         Tf_curr = int(pred_abs.shape[1])
 
@@ -216,6 +243,7 @@ def evaluate(
                 vel_np = vel_s.detach().cpu().numpy()
                 acc_np = acc_s.detach().cpu().numpy()
                 jerk_np = jerk_s.detach().cpu().numpy()
+                mse_np = mse_s.detach().cpu().numpy()
 
                 for i in range(Bb):
                     m = metas[i] or {}
@@ -229,22 +257,32 @@ def evaluate(
                     if lab is None:
                         continue
                     n_matched += 1
+                    
                     ev = lab.get("event_label", None) or "unknown"
+                    
+                    # [수정] Lane Change 라벨 통합 로직
+                    if ev == "simple_lane_change" or ev == "lane_change_other":
+                        ev = "lane_change"
+
                     st = lab.get("state_label", None) or "unknown"
 
+                    # Index: 0:ADE, 1:FDE, 2:Vel, 3:Acc, 4:Jerk, 5:SE(MSE), 6:Count
+                    
                     ev_stats[ev][0] += float(ade_np[i])
                     ev_stats[ev][1] += float(fde_np[i])
                     ev_stats[ev][2] += float(vel_np[i])
                     ev_stats[ev][3] += float(acc_np[i])
                     ev_stats[ev][4] += float(jerk_np[i])
-                    ev_stats[ev][5] += 1
+                    ev_stats[ev][5] += float(mse_np[i]) # 누적: Mean Squared Error per sample
+                    ev_stats[ev][6] += 1
 
                     st_stats[st][0] += float(ade_np[i])
                     st_stats[st][1] += float(fde_np[i])
                     st_stats[st][2] += float(vel_np[i])
                     st_stats[st][3] += float(acc_np[i])
                     st_stats[st][4] += float(jerk_np[i])
-                    st_stats[st][5] += 1
+                    st_stats[st][5] += float(mse_np[i])
+                    st_stats[st][6] += 1
 
         pbar.set_postfix({
             "loss": f"{loss.item():.4f}",
@@ -263,7 +301,7 @@ def evaluate(
     overall_acc = sum_acc / max(1, n_samples)
     overall_jerk = sum_jerk / max(1, n_samples)
     
-    # [RMSE 결과]
+    # [RMSE 최종 계산] sqrt(Total SE / Total Points)
     overall_rmse = math.sqrt(sum_se_total / max(1, n_points_total))
 
     matched_ratio = float("nan")
@@ -283,6 +321,9 @@ def evaluate(
         "matched_ratio": float(matched_ratio),
     }
 
+    if measure_latency:
+        results.update(lat_results)
+
     for sec in eval_horizons_sec:
         total_se = rmse_accum[sec]
         count = rmse_counts[sec]
@@ -292,32 +333,42 @@ def evaluate(
             rmse_val = float('nan')
         results[f"rmse_{sec}s"] = rmse_val
 
+    # -------------------------
     # Stratified CSV saving
+    # -------------------------
     def _per_label_row(stats_dict, label: str):
-        sa, sf, sv, sac, sj, c = stats_dict.get(label, [0.0, 0.0, 0.0, 0.0, 0.0, 0])
+        # sa: sum_ade, sf: sum_fde, sv: sum_vel, sac: sum_acc, sj: sum_jerk, smse: sum_mse, c: count
+        vals = stats_dict.get(label, [0.0]*7)
+        sa, sf, sv, sac, sj, smse, c = vals
         if c <= 0:
-            return (0, np.nan, np.nan, np.nan, np.nan, np.nan)
+            return (0, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
         c = int(c)
-        return (c, float(sa / c), float(sf / c), float(sv / c), float(sac / c), float(sj / c))
+        rmse = math.sqrt(smse / c) # sqrt(Average MSE) = Global RMSE (동일 length 가정 시)
+        return (c, float(sa / c), float(sf / c), rmse, float(sv / c), float(sac / c), float(sj / c))
 
     if labels_lut is not None and n_total_samples > 0 and epoch is not None:
         coverage = {
+            "config": str(cfg_path),
+            "ckpt": str(ckpt_path),
             "epoch": int(epoch),
             "matched": int(n_matched),
             "total": int(n_total_samples),
             "matched_ratio": float(n_matched / max(1, n_total_samples)),
         }
-        EVENT_LABELS = ["none", "cut_in", "merging", "diverging", "simple_lane_change", "lane_change_other", "unknown"]
+        
+        # [수정] 통합된 Label List 사용
+        EVENT_LABELS = ["none", "cut_in", "merging", "diverging", "lane_change", "unknown"]
         STATE_LABELS = ["free_flow", "dense", "car_following", "ramp_driving", "other", "unknown"]
 
         if save_event_path is not None:
             save_event_path.parent.mkdir(parents=True, exist_ok=True)
             row = dict(coverage)
             for lab in EVENT_LABELS:
-                c, a, f, v, ac, j = _per_label_row(ev_stats, lab)
+                c, a, f, r, v, ac, j = _per_label_row(ev_stats, lab)
                 row[f"{lab}_count"] = c
                 row[f"{lab}_ADE"] = a
                 row[f"{lab}_FDE"] = f
+                row[f"{lab}_RMSE"] = r
                 row[f"{lab}_vel"] = v
                 row[f"{lab}_acc"] = ac
                 row[f"{lab}_jerk"] = j
@@ -329,10 +380,11 @@ def evaluate(
             save_state_path.parent.mkdir(parents=True, exist_ok=True)
             row = dict(coverage)
             for lab in STATE_LABELS:
-                c, a, f, v, ac, j = _per_label_row(st_stats, lab)
+                c, a, f, r, v, ac, j = _per_label_row(st_stats, lab)
                 row[f"{lab}_count"] = c
                 row[f"{lab}_ADE"] = a
                 row[f"{lab}_FDE"] = f
+                row[f"{lab}_RMSE"] = r
                 row[f"{lab}_vel"] = v
                 row[f"{lab}_acc"] = ac
                 row[f"{lab}_jerk"] = j
@@ -342,6 +394,7 @@ def evaluate(
 
     return results
 
+# train_one_epoch은 변경사항이 없으므로 생략합니다 (기존과 동일하게 사용).
 def train_one_epoch(
     model, loader, device, optimizer, scheduler, scaler,
     use_amp, predict_delta, grad_clip_norm,

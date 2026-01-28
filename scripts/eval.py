@@ -6,17 +6,18 @@ import argparse
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+import numpy as np
 import yaml
 import torch
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 
 import platform
 
 from src.datasets.pt_dataset import PtWindowDataset
 from src.datasets.collate import collate_batch
 from src.models.build import build_model
-from src.utils import set_seed, resolve_path, resolve_data_paths
-from src.stats import compute_stats_if_needed, load_stats_npz_strict, assert_stats_match_batch_dims, make_stats_filename
+from src.utils import set_seed, resolve_data_paths
+from src.stats import load_stats_npz_strict, assert_stats_match_batch_dims, make_stats_filename
 from src.log import log_eval_to_csv
 from src.engine import evaluate
 from src.scenarios import load_window_labels_csv
@@ -94,16 +95,25 @@ def main():
     highd_pt_dir = paths.get("highd_pt_dir", Path(f"./data/highD/data_pt/highd_{tag}"))
     exid_splits_dir = paths.get("exid_splits_dir", Path("./data/exiD/splits"))
     highd_splits_dir = paths.get("highd_splits_dir", Path("./data/highD/splits"))
+    
     exid_stats_dir = paths.get("exid_stats_dir", Path("./data/exiD/stats"))
     highd_stats_dir = paths.get("highd_stats_dir", Path("./data/highD/stats"))
     combined_stats_dir = paths.get("combined_stats_dir", Path("./data/combined/stats"))
 
-    mode = str(cfg.get("data", {}).get("mode", "exid")).lower()  # exid | highd | combined
+    use_ego_static = bool(cfg.get("features", {}).get("use_ego_static", True))
+    use_nb_static = bool(cfg.get("features", {}).get("use_nb_static", True))
+
+
+    mode = str(cfg.get("data", {}).get("mode", "exid")).lower()
     if mode not in ("exid", "highd", "combined"):
         raise ValueError(f"data.mode must be one of exid/highd/combined, got: {mode}")
 
-    use_ego_static = bool(cfg.get("features", {}).get("use_ego_static", True))
-    use_nb_static = bool(cfg.get("features", {}).get("use_nb_static", True))
+    if mode == "exid":
+        splits_index_dir = Path("./data/exiD/splits")
+    elif mode == "highd":
+        splits_index_dir = Path("./data/highD/splits")
+    else:
+        splits_index_dir = Path("./data/combined/splits")
 
     # -------------------------
     # stats (subprocess only)
@@ -130,62 +140,135 @@ def main():
         assert_stats_match_batch_dims(stats, ego_dim_cfg, nb_dim_cfg, stats_path)
 
     # -------------------------
+    # Scenario Labels & Config Check
+    # -------------------------
+    labels_lut = None
+    labels_cfg = cfg.get("data", {}).get("scenario_labels", None)
+    if labels_cfg:
+        if isinstance(labels_cfg, str):
+            labels_lut = load_window_labels_csv(Path(labels_cfg))
+        elif isinstance(labels_cfg, dict):
+            merged = {}
+            if "exid" in labels_cfg:
+                merged.update(load_window_labels_csv(Path(labels_cfg["exid"])))
+            if "highd" in labels_cfg:
+                merged.update(load_window_labels_csv(Path(labels_cfg["highd"])))
+            labels_lut = merged
+
+    sam_cfg = cfg.get("data", {}).get("scenario_sampling", None)
+    use_scenario_sampling = bool(sam_cfg and labels_lut is not None)
+
+    # -------------------------
     # datasets / loaders setup
     # -------------------------
     eval_targets = []
+    
+    target_split = args.split  # "test" or "val"
 
-    if mode == "exid":
-        test_ds = PtWindowDataset(
-            data_dir=exid_pt_dir,
-            split_txt=exid_splits_dir / "test.txt",
-            stats=stats,
-            return_meta=True,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="exid",
-        )
-        eval_targets.append(("exid", test_ds))
+    if use_scenario_sampling:
+        print(f"\n[DATA-MODE] Scenario Sampling ON -> Loading indices from {splits_index_dir}/{target_split}_indices.npy")
+        
+        # 1. 인덱스 로드
+        try:
+            indices = np.load(splits_index_dir / f"{target_split}_indices.npy")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Index file not found. Did you run create_splits.py for mode={mode}?")
 
-    elif mode == "highd":
-        test_ds = PtWindowDataset(
-            data_dir=highd_pt_dir,
-            split_txt=highd_splits_dir / "test.txt",
-            stats=stats,
-            return_meta=True,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="highd",
-        )
-        eval_targets.append(("highd", test_ds))
+        # 2. 전체 데이터셋 로드 (Full Load)
+        if mode == "exid":
+            full_ds = PtWindowDataset(exid_pt_dir, split_txt=None, stats=stats, return_meta=True, 
+                                      use_ego_static=use_ego_static, use_nb_static=use_nb_static, dataset_name="exid")
+            test_ds = Subset(full_ds, indices)
+            eval_targets.append(("exid", test_ds))
+
+        elif mode == "highd":
+            full_ds = PtWindowDataset(highd_pt_dir, split_txt=None, stats=stats, return_meta=True,
+                                      use_ego_static=use_ego_static, use_nb_static=use_nb_static, dataset_name="highd")
+            test_ds = Subset(full_ds, indices)
+            eval_targets.append(("highd", test_ds))
+
+        else: # combined
+            # (1) Full Datasets 로드
+            exid_full = PtWindowDataset(exid_pt_dir, split_txt=None, stats=stats, return_meta=True, 
+                                        use_ego_static=use_ego_static, use_nb_static=use_nb_static, dataset_name="exid")
+            highd_full = PtWindowDataset(highd_pt_dir, split_txt=None, stats=stats, return_meta=True,
+                                         use_ego_static=use_ego_static, use_nb_static=use_nb_static, dataset_name="highd")
+            
+            # (2) Combined Dataset 생성
+            combined_full = ConcatDataset([exid_full, highd_full])
+            
+            # (3) Combined Eval Target
+            combined_subset = Subset(combined_full, indices)
+            eval_targets.append(("combined", combined_subset))
+            
+            # (4) ExiD Only / HighD Only 분리 (인덱스 기준)
+            cutoff = len(exid_full)
+            
+            # exiD에 해당하는 인덱스만 골라내기
+            exid_indices = indices[indices < cutoff]
+            if len(exid_indices) > 0:
+                exid_subset = Subset(exid_full, exid_indices)
+                eval_targets.append(("exid_only", exid_subset))
+            
+            # highD에 해당하는 인덱스만 골라내기 (Offset 보정 필요)
+            highd_indices = indices[indices >= cutoff]
+            if len(highd_indices) > 0:
+                # highD 개별 데이터셋 기준으로는 인덱스가 0부터 시작해야 하므로 cutoff를 뺌
+                highd_subset = Subset(highd_full, highd_indices - cutoff)
+                eval_targets.append(("highd_only", highd_subset))
 
     else:
-        # Combined 모드인 경우: 개별 데이터셋을 먼저 로드
-        exid_test_ds = PtWindowDataset(
-            data_dir=exid_pt_dir,
-            split_txt=exid_splits_dir / "test.txt",
-            stats=stats,
-            return_meta=True,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="exid",
-        )
-        highd_test_ds = PtWindowDataset(
-            data_dir=highd_pt_dir,
-            split_txt=highd_splits_dir / "test.txt",
-            stats=stats,
-            return_meta=True,
-            use_ego_static=use_ego_static,
-            use_nb_static=use_nb_static,
-            dataset_name="highd",
-        )
-        combined_ds = ConcatDataset([exid_test_ds, highd_test_ds])
+        # [OLD WAY] 기존 텍스트 파일 기반 로딩
+        print(f"\n[DATA-MODE] Scenario Sampling OFF -> Loading files via {target_split}.txt")
+        
+        if mode == "exid":
+            test_ds = PtWindowDataset(
+                data_dir=exid_pt_dir,
+                split_txt=exid_splits_dir / f"{target_split}.txt",
+                stats=stats,
+                return_meta=True,
+                use_ego_static=use_ego_static,
+                use_nb_static=use_nb_static,
+                dataset_name="exid",
+            )
+            eval_targets.append(("exid", test_ds))
 
-        # 1. 전체(Combined) 평가
-        eval_targets.append(("combined", combined_ds))
-        # 2. exiD 만 따로 평가
-        eval_targets.append(("exid_only", exid_test_ds))
-        # 3. highD 만 따로 평가
-        eval_targets.append(("highd_only", highd_test_ds))
+        elif mode == "highd":
+            test_ds = PtWindowDataset(
+                data_dir=highd_pt_dir,
+                split_txt=highd_splits_dir / f"{target_split}.txt",
+                stats=stats,
+                return_meta=True,
+                use_ego_static=use_ego_static,
+                use_nb_static=use_nb_static,
+                dataset_name="highd",
+            )
+            eval_targets.append(("highd", test_ds))
+
+        else: # combined
+            exid_test_ds = PtWindowDataset(
+                data_dir=exid_pt_dir,
+                split_txt=exid_splits_dir / f"{target_split}.txt",
+                stats=stats,
+                return_meta=True,
+                use_ego_static=use_ego_static,
+                use_nb_static=use_nb_static,
+                dataset_name="exid",
+            )
+            highd_test_ds = PtWindowDataset(
+                data_dir=highd_pt_dir,
+                split_txt=highd_splits_dir / f"{target_split}.txt",
+                stats=stats,
+                return_meta=True,
+                use_ego_static=use_ego_static,
+                use_nb_static=use_nb_static,
+                dataset_name="highd",
+            )
+            combined_ds = ConcatDataset([exid_test_ds, highd_test_ds])
+
+            eval_targets.append(("combined", combined_ds))
+            eval_targets.append(("exid_only", exid_test_ds))
+            eval_targets.append(("highd_only", highd_test_ds))
 
     # -------------------------
     # Loop over targets
@@ -259,6 +342,9 @@ def main():
             latency_iters=200,
             latency_warmup=30,
             latency_per_sample=True,
+            # [NEW] Pass paths
+            cfg_path=cfg_path,
+            ckpt_path=Path(args.ckpt),
         )
 
         # CSV Logging
