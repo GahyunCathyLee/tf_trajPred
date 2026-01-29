@@ -83,7 +83,7 @@ def evaluate(
         B_lat = int(x_ego_l.shape[0])
 
         def _one_infer():
-            with autocast(device_type="cuda", enabled=use_amp):
+            with autocast(device_type="cuda", enabled=use_amp, dtype=torch.bfloat16):
                 out = model(x_ego_l, x_nb_l, nb_mask_l)
                 if isinstance(out, (tuple, list)):
                     pred, scores = out
