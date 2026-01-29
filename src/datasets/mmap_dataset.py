@@ -76,35 +76,27 @@ class MmapDataset(Dataset):
     def __getitem__(self, idx):
         real_idx = self.indices[idx]
         
-        # 1. Core Data
+        # 1. Core Data (Copy only)
         x_hist = torch.from_numpy(self.x_ego[real_idx].copy())
-        x_hist = torch.nan_to_num(x_hist, nan=0.0, posinf=1e6, neginf=-1e6)
-        
         y_fut = torch.from_numpy(self.y[real_idx].copy())
-        y_fut = torch.nan_to_num(y_fut, nan=0.0, posinf=1e6, neginf=-1e6)
-        
         x_last_abs = torch.from_numpy(self.x_last[real_idx].copy())
-        x_last_abs = torch.nan_to_num(x_last_abs, nan=0.0, posinf=1e6, neginf=-1e6)
 
         # 2. Static
         if self.use_ego_static and self.ego_static is not None:
             estat = torch.from_numpy(self.ego_static[real_idx].copy())
-            estat = torch.nan_to_num(estat, nan=0.0)
             estat = estat.unsqueeze(0).expand(x_hist.shape[0], -1)
             x_hist = torch.cat([x_hist, estat], dim=-1)
 
         # 3. Neighbors
         if self.use_neighbors:
             x_nb = torch.from_numpy(self.x_nb[real_idx].copy())
-            x_nb = torch.nan_to_num(x_nb, nan=0.0, posinf=1e6, neginf=-1e6)
             nb_mask = torch.from_numpy(self.mask[real_idx].copy())
             
             if self.use_nb_static and self.nb_static is not None:
                 nstat = torch.from_numpy(self.nb_static[real_idx].copy())
-                nstat = torch.nan_to_num(nstat, nan=0.0)
                 x_nb = torch.cat([x_nb, nstat], dim=-1)
         else:
-            # Ablation
+            # Ablation (Shape only)
             nb_shape = self.x_nb[real_idx].shape
             mask_shape = self.mask[real_idx].shape
             if self.use_nb_static and self.nb_static is not None:
@@ -121,9 +113,6 @@ class MmapDataset(Dataset):
                 x_hist = (x_hist - self._ego_mean) / self._ego_std.clamp_min(1e-2)
             if self.use_neighbors and self._nb_mean is not None:
                 x_nb = (x_nb - self._nb_mean) / self._nb_std.clamp_min(1e-2)
-        
-        x_hist = torch.nan_to_num(x_hist, nan=0.0)
-        x_nb = torch.nan_to_num(x_nb, nan=0.0)
 
         out = {
             "x_ego": x_hist,
@@ -133,15 +122,14 @@ class MmapDataset(Dataset):
             "x_last_abs": x_last_abs
         }
         
-        # [추가] Vel/Acc return
+        # [Vel/Acc]
         if self.y_vel is not None:
-            out["y_vel"] = torch.nan_to_num(torch.from_numpy(self.y_vel[real_idx].copy()), nan=0.0)
+            out["y_vel"] = torch.from_numpy(self.y_vel[real_idx].copy())
         else:
-            # Fallback if file missing
             out["y_vel"] = torch.zeros_like(y_fut)
 
         if self.y_acc is not None:
-            out["y_acc"] = torch.nan_to_num(torch.from_numpy(self.y_acc[real_idx].copy()), nan=0.0)
+            out["y_acc"] = torch.from_numpy(self.y_acc[real_idx].copy())
         else:
             out["y_acc"] = torch.zeros_like(y_fut)
 
