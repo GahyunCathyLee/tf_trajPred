@@ -3,19 +3,18 @@
 
 Convert highD window NPZs -> PT.
 
-This is a good place to move *per-sample* work out of the training DataLoader.
-With the options below, you can:
-  - cast arrays to the final dtypes once (float32 / bool)
-  - concatenate static features into x_hist / nb_hist once
-  - precompute x_last_abs once
+Supports the updated schema:
+- x_hist: (N,T,13) float32
+- ego_safety: (N,T,5) float32
+- y_fut: (N,Tf,2) float32
+- nb_hist: (N,T,K,9) float32
+- nb_mask: (N,T,K) bool
+- ego_static: (N,Ds) float32
+- nb_static: (N,T,K,Ds) float32 (or (N,K,Ds))
 
-These changes make the Dataset __getitem__ mostly slicing (much faster).
-
-Typical usage (recommended for faster training):
-  python3 scripts/highd_npz_to_pt.py \
-    --npz_dir data_npz/highd_T2_Tf5_hz5_flipXY_all \
-    --pt_root data_pt \
-    --concat_static --save_x_last_abs
+Optional:
+- --concat_static: concat ego_static into x_hist and nb_static into nb_hist
+- --save_x_last_abs: store x_last_abs = x_hist[:, -1, 0:2]
 """
 
 import argparse
@@ -36,6 +35,7 @@ def _to_tensor(v):
 
 FLOAT_KEYS_DEFAULT = {
     "x_hist",
+    "ego_safety",
     "y_fut",
     "nb_hist",
     "ego_static",
@@ -106,19 +106,16 @@ def convert_one(
 ):
     try:
         data = np.load(npz_path, allow_pickle=True)
-
-        out = {}
-        for k in data.files:
-            out[k] = _to_tensor(data[k])
+        out = {k: _to_tensor(data[k]) for k in data.files}
 
         # 1) cast dtypes
         if cast_float32:
             for k in list(out.keys()):
                 if k in FLOAT_KEYS_DEFAULT and isinstance(out[k], torch.Tensor) and out[k].is_floating_point():
                     out[k] = _as_float32(out[k])
-        
+
         if cast_mask_bool and "nb_mask" in out and isinstance(out["nb_mask"], torch.Tensor):
-            out[k] = _as_bool(out["nb_mask"])
+            out["nb_mask"] = _as_bool(out["nb_mask"])
 
         # 2) concat static
         if concat_static:
@@ -131,36 +128,49 @@ def convert_one(
         if save_x_last_abs:
             _maybe_make_x_last_abs(out)
 
+        # 4) NaN/Inf check
         if check_nan:
             for k, v in out.items():
                 if isinstance(v, torch.Tensor) and v.is_floating_point():
                     if not torch.isfinite(v).all():
-                        print(f"⚠️ [SKIP] {npz_path.name} contains NaN or Inf in key '{k}'")
-                        return  
+                        print(f"⚠️ [SKIP] {npz_path.name} contains NaN/Inf in key '{k}'")
+                        return
 
-        for k, v in out.items():
+        # 5) make contiguous
+        for k, v in list(out.items()):
             if isinstance(v, torch.Tensor) and not v.is_contiguous():
                 out[k] = v.contiguous()
 
-        # 4) Shape Check
+        # 6) shape checks
         if check_shapes:
-            if "x_hist" in out and "y_fut" in out:
+            if "x_hist" in out:
                 x_hist = out["x_hist"]
+                assert isinstance(x_hist, torch.Tensor) and x_hist.ndim == 3, \
+                    f"x_hist must be (N,T,D), got {tuple(x_hist.shape)}"
+
+            if "y_fut" in out:
                 y_fut = out["y_fut"]
-                assert x_hist.ndim == 3, f"x_hist must be (N,T,D), got {tuple(x_hist.shape)}"
-                assert y_fut.ndim == 3, f"y_fut must be (N,Tf,2), got {tuple(y_fut.shape)}"
+                assert isinstance(y_fut, torch.Tensor) and y_fut.ndim == 3 and y_fut.shape[-1] == 2, \
+                    f"y_fut must be (N,Tf,2), got {tuple(y_fut.shape)}"
 
-        if "nb_hist" in out:
-            nb_hist = out["nb_hist"]
-            assert nb_hist.ndim == 4, f"nb_hist must be (N,T,K,Dn), got {tuple(nb_hist.shape)}"
+            if "ego_safety" in out:
+                es = out["ego_safety"]
+                assert isinstance(es, torch.Tensor) and es.ndim == 3 and es.shape[-1] == 5, \
+                    f"ego_safety must be (N,T,5), got {tuple(es.shape)}"
 
-        if "nb_mask" in out:
-            nb_mask = out["nb_mask"]
-            assert nb_mask.ndim == 3, f"nb_mask must be (N,T,K), got {tuple(nb_mask.shape)}"
+            if "nb_hist" in out:
+                nb_hist = out["nb_hist"]
+                assert isinstance(nb_hist, torch.Tensor) and nb_hist.ndim == 4, \
+                    f"nb_hist must be (N,T,K,Dn), got {tuple(nb_hist.shape)}"
+
+            if "nb_mask" in out:
+                nb_mask = out["nb_mask"]
+                assert isinstance(nb_mask, torch.Tensor) and nb_mask.ndim == 3, \
+                    f"nb_mask must be (N,T,K), got {tuple(nb_mask.shape)}"
 
         pt_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(out, pt_path)
-        
+
     except Exception as e:
         print(f"❌ [ERROR] Failed to convert {npz_path.name}: {e}")
 
@@ -200,6 +210,7 @@ def main():
             concat_static=args.concat_static,
             remove_static_keys=(not args.keep_static_keys),
             save_x_last_abs=args.save_x_last_abs,
+            check_nan=(not args.skip_nan_check),
         )
         print(f"Converted: {npz_path.name} -> {pt_path.name}")
 

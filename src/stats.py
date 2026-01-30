@@ -21,21 +21,32 @@ def load_stats_npz_strict(stats_path: Path) -> Dict[str, torch.Tensor]:
             raise RuntimeError(f"[STATS] missing key '{k}' in {stats_path}")
     return stats
 
-def make_stats_filename(tag: str, use_ego_static: bool, use_nb_static: bool) -> str:
+def make_stats_filename(
+    tag: str,
+    use_ego_static: bool,
+    use_nb_static: bool,
+    use_lc: bool,
+    use_lead: bool,
+) -> str:
     """
     Naming rule:
-      - es=1 & ns=1 -> {tag}.npz
-      - es=0 & ns=1 -> {tag}_e0.npz
-      - es=1 & ns=0 -> {tag}_n0.npz
-      - es=0 & ns=0 -> {tag}_e0n0.npz
+      - all on -> {tag}.npz
+      - otherwise append suffix for disabled toggles in fixed order:
+          _e0  (ego_static off)
+          _n0  (nb_static off)
+          _lc0 (lane-change features off)
+          _ld0 (lead/safety features off)
     """
-    if use_ego_static and use_nb_static:
-        return f"{tag}.npz"
-    if (not use_ego_static) and use_nb_static:
-        return f"{tag}_e0.npz"
-    if use_ego_static and (not use_nb_static):
-        return f"{tag}_n0.npz"
-    return f"{tag}_e0n0.npz"
+    suffix = ""
+    if not use_ego_static:
+        suffix += "_e0"
+    if not use_nb_static:
+        suffix += "_n0"
+    if not use_lc:
+        suffix += "_lc0"
+    if not use_lead:
+        suffix += "_ld0"
+    return f"{tag}{suffix}.npz"
 
 
 def _as_list(x: Union[Path, Sequence[Path]]) -> List[Path]:
@@ -53,6 +64,8 @@ def compute_stats_if_needed(
     num_workers: int,
     use_ego_static: bool,
     use_nb_static: bool,
+    use_lc: bool,
+    use_lead: bool,
 ) -> None:
 
     if stats_path.exists():
@@ -89,6 +102,10 @@ def compute_stats_if_needed(
         cmd.append("--use_ego_static")
     if use_nb_static:
         cmd.append("--use_nb_static")
+    if use_lc:
+        cmd.append("--use_lc")
+    if use_lead:
+        cmd.append("--use_lead")
 
     print("[INFO] Auto-computing stats with command:")
     print("  " + " ".join(cmd))

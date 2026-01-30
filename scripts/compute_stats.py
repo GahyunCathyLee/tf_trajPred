@@ -27,10 +27,12 @@ class PtWindowDatasetNoNorm(Dataset):
       nb_static  : (N,T,K,Ds_nb)  or (N,K,Ds_nb)
     """
 
-    def __init__(self, data_dir: Path, split_txt: Path, use_ego_static: bool, use_nb_static: bool):
+    def __init__(self, data_dir: Path, split_txt: Path, use_ego_static: bool, use_nb_static: bool, use_lc: bool, use_lead: bool) -> None:
         self.data_dir = Path(data_dir)
         self.use_ego_static = use_ego_static
         self.use_nb_static = use_nb_static
+        self.use_lc = use_lc
+        self.use_lead = use_lead
 
         names = [ln.strip() for ln in split_txt.read_text().splitlines() if ln.strip()]
         self.files = [self.data_dir / n for n in names]
@@ -73,7 +75,12 @@ class PtWindowDatasetNoNorm(Dataset):
         
         file_path = self.files[rec_i]
 
-        x = d["x_hist"][local_i].to(torch.float32)
+        x = d["x_hist"][local_i].to(torch.float32)          # (T, 23)
+
+        if self.use_lead:
+            ego_safety = d["ego_safety"][local_i].to(torch.float32)  # (T, 5)
+            x = torch.cat([x, ego_safety], dim=-1)          # (T, 28)
+
         nb = d["nb_hist"][local_i].to(torch.float32)
         mask = d["nb_mask"][local_i].bool()
 
@@ -165,6 +172,8 @@ def main() -> None:
 
     ap.add_argument("--use_ego_static", action="store_true")
     ap.add_argument("--use_nb_static", action="store_true")
+    ap.add_argument("--use_lc", action="store_true")
+    ap.add_argument("--use_lead", action="store_true")
 
     ap.add_argument("--batch_size", type=int, default=512)
     ap.add_argument("--num_workers", type=int, default=4)
@@ -193,6 +202,8 @@ def main() -> None:
             split_txt=split_file,
             use_ego_static=args.use_ego_static,
             use_nb_static=args.use_nb_static,
+            use_lc=args.use_lc,
+            use_lead=args.use_lead,
         )
 
         dl = DataLoader(
