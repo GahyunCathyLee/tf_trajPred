@@ -92,6 +92,7 @@ def main():
 
     exid_pt_dir = paths.get("exid_pt_dir", Path(f"./data/exiD/data_pt/exid_{tag}"))
     highd_pt_dir = paths.get("highd_pt_dir", Path(f"./data/highD/data_pt/highd_{tag}"))
+
     exid_splits_dir = paths.get("exid_splits_dir", Path("./data/exiD/splits"))
     highd_splits_dir = paths.get("highd_splits_dir", Path("./data/highD/splits"))
     
@@ -100,19 +101,22 @@ def main():
     combined_stats_dir = paths.get("combined_stats_dir", Path("./data/combined/stats"))
 
     # -------------------------
-    # Feature Toggles (FIXED)
+    # feature toggles
     # -------------------------
-    feat_cfg = cfg.get("features", {})
-    # [중요] Config에서 플래그를 명확히 읽어옵니다.
-    use_ego_static = bool(feat_cfg.get("use_ego_static", True))
-    use_nb_static = bool(feat_cfg.get("use_nb_static", True))
-    use_lc = bool(feat_cfg.get("use_lc", True))
-    use_lead = bool(feat_cfg.get("use_lead", True))
+    f_cfg = cfg.get("features", {})
+    use_ego_static = f_cfg.get("use_ego_static", True)
+    use_nb_static = f_cfg.get("use_nb_static", True)
+    use_lead = f_cfg.get("use_lead", True)
+    use_lc_state = f_cfg.get("use_lc_state", True)
+    use_dxtime = f_cfg.get("use_dxtime", True)
+    use_gate = f_cfg.get("use_gate", True)
 
     print("==== Feature Toggles ====")
     print(f"use_ego_static = {use_ego_static}")
     print(f"use_nb_static  = {use_nb_static}")
-    print(f"use_lc         = {use_lc}")
+    print(f"use_lc_state      = {use_lc_state}")
+    print(f"use_dxtime  = {use_dxtime}")
+    print(f"use_gate    = {use_gate}")
     print(f"use_lead       = {use_lead}")
 
     mode = str(cfg.get("data", {}).get("mode", "exid")).lower()
@@ -129,14 +133,11 @@ def main():
     # -------------------------
     # Stats Loading
     # -------------------------
-    # [수정] train.py와 동일하게 모든 플래그를 사용하여 파일명을 생성합니다.
-    # 만약 사용자가 생성한 파일명이 짧은 이름(T2_Tf5_hz3.npz)으로 고정되어 있다면, 
-    # make_stats_filename 함수 내부 로직이나 이 부분을 직접 수정해야 합니다.
-    # 여기서는 train.py와 로직을 통일합니다.
-    stats_fname = make_stats_filename(tag, use_ego_static, use_nb_static, use_lc, use_lead)
-    
-    # [Fallback Check] 만약 긴 이름의 파일이 없고 짧은 이름만 있다면 짧은 이름 시도
-    # (사용자가 T2_Tf5_hz3.npz가 맞다고 했으므로 이에 대한 예외처리 추가)
+    stats_fname = make_stats_filename(
+        tag, use_ego_static, use_nb_static, 
+        use_lc_state, use_dxtime, use_gate,
+        use_lead
+    )
     if mode == "exid":
         stats_path = exid_stats_dir / stats_fname
     elif mode == "highd":
@@ -145,7 +146,6 @@ def main():
         stats_path = combined_stats_dir / stats_fname
     
     if not stats_path.exists():
-        # 혹시 짧은 이름 파일이 있는지 확인
         short_name = f"{tag}.npz"
         alt_path = stats_path.parent / short_name
         if alt_path.exists():
@@ -168,20 +168,19 @@ def main():
     # Dataset Factory Helper (CRITICAL FIX)
     # -------------------------
     def make_ds(pt_dir: Path, split_txt: Optional[Path], ds_name: str):
-        # [핵심 수정] use_ego_static, use_nb_static 등의 플래그를 데이터셋에 '반드시' 전달해야 합니다.
-        # 전달하지 않으면 기본값(False일 수도 있음)으로 로드되어 차원(Static 10차원 누락)이 안 맞게 됩니다.
         return PtWindowDataset(
             data_dir=pt_dir,
             split_txt=split_txt,
             stats=stats,
             return_meta=True,
-            use_ego_static=use_ego_static, # 이 부분이 True여야 데이터가 28차원이 됨
-            use_nb_static=use_nb_static,   # 이 부분이 True여야 nb 데이터 차원이 맞음
-            use_lc=use_lc,      
-            use_lead=use_lead, 
+            use_ego_static=use_ego_static,
+            use_nb_static=use_nb_static,
+            use_lead=use_lead,
+            use_lc_state=use_lc_state,
+            use_dxtime=use_dxtime,
+            use_gate=use_gate,
             dataset_name=ds_name,
         )
-
     # -------------------------
     # Scenario Labels & Config Check
     # -------------------------
@@ -315,8 +314,8 @@ def main():
             predict_delta=predict_delta,
             w_ade=float(loss_cfg.get("w_ade", 1.0)),
             w_fde=float(loss_cfg.get("w_fde", 0.0)),
-            w_cls=float(loss_cfg.get("w_cls", 0.5)),
-            w_rmse=float(loss_cfg.get("w_rmse", 0.0)),
+            w_cls=float(loss_cfg.get("w_cls", 0.1)),
+            w_rmse=float(loss_cfg.get("w_rmse", 0.5)),
             data_hz=data_hz,
             labels_lut=labels_lut,
             save_event_path=curr_save_event,
@@ -341,14 +340,17 @@ def main():
                 split=args.split,
                 mode=target_name,
                 tag=tag,
-                device=str(device),
                 batch_size=int(batch_size),
                 num_workers=int(args.num_workers),
                 seed=int(args.seed),
                 use_amp=bool(args.use_amp),
                 stats_path=stats_path,
+                use_lead=use_lead,
                 use_ego_static=use_ego_static,
                 use_nb_static=use_nb_static,
+                use_lc_state=use_lc_state,
+                use_dxtime=use_dxtime,
+                use_gate=use_gate,
                 metrics=metrics,
             )
             print(f"[OK] appended to: {csv_out} (mode={target_name})")
