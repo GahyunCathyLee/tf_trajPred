@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 class MmapDataset(Dataset):
     """
     Memory-efficient dataset using memory mapping.
-    Includes y_vel and y_acc for evaluation.
+    Supports pre-normalized data and granular feature toggles.
     """
     def __init__(
         self,
@@ -20,7 +20,13 @@ class MmapDataset(Dataset):
         use_ego_static: bool = True,
         use_nb_static: bool = True,
         use_neighbors: bool = True,
+        # [추가 1] 세부 Feature Toggle
+        use_lc_state: bool = True,
+        use_dxtime: bool = True,
+        use_gate: bool = True,
         dataset_name: Optional[str] = None,
+        # [추가 2] 미리 정규화된 데이터인지 여부 (서버에서는 기본값 True 권장)
+        is_pre_normalized: bool = True, 
     ):
         self.data_dir = Path(data_dir)
         self.tag = tag
@@ -29,16 +35,23 @@ class MmapDataset(Dataset):
         self.use_ego_static = use_ego_static
         self.use_nb_static = use_nb_static
         self.use_neighbors = use_neighbors
-        self.dataset_name = dataset_name
+        
+        # Feature Toggle 저장
+        self.use_lc_state = use_lc_state
+        self.use_dxtime = use_dxtime
+        self.use_gate = use_gate
 
-        # Mmap Load
+        self.dataset_name = dataset_name
+        self.is_pre_normalized = is_pre_normalized
+
+        # Mmap Load (변동 없음)
         self.x_ego = np.load(self.data_dir / f"{tag}_x_ego.npy", mmap_mode='r')
         self.x_nb = np.load(self.data_dir / f"{tag}_x_nb.npy", mmap_mode='r')
         self.y = np.load(self.data_dir / f"{tag}_y.npy", mmap_mode='r')
         self.mask = np.load(self.data_dir / f"{tag}_nb_mask.npy", mmap_mode='r')
         self.x_last = np.load(self.data_dir / f"{tag}_x_last_abs.npy", mmap_mode='r')
         
-        # [추가] Velocity / Acceleration Load
+        # Optional Files Load (변동 없음)
         self.y_vel = None
         if (self.data_dir / f"{tag}_y_vel.npy").exists():
             self.y_vel = np.load(self.data_dir / f"{tag}_y_vel.npy", mmap_mode='r')
@@ -55,7 +68,7 @@ class MmapDataset(Dataset):
         if (self.data_dir / f"{tag}_nb_static.npy").exists():
             self.nb_static = np.load(self.data_dir / f"{tag}_nb_static.npy", mmap_mode='r')
 
-        # Meta
+        # Meta Load (변동 없음)
         self.meta_rec = None
         if return_meta:
             self.meta_rec = np.load(self.data_dir / f"{tag}_meta_recordingId.npy", mmap_mode='r')
@@ -64,6 +77,7 @@ class MmapDataset(Dataset):
 
         self.indices = split_indices if split_indices is not None else np.arange(len(self.x_ego))
 
+        # Stats Load (변동 없음)
         if self.stats:
             self._ego_mean = self.stats.get("ego_mean")
             self._ego_std = self.stats.get("ego_std")
@@ -76,39 +90,57 @@ class MmapDataset(Dataset):
     def __getitem__(self, idx):
         real_idx = self.indices[idx]
         
-        # 1. Core Data (Copy only)
+        # 1. Core Data (Ego)
         x_hist = torch.from_numpy(self.x_ego[real_idx].copy())
         y_fut = torch.from_numpy(self.y[real_idx].copy())
         x_last_abs = torch.from_numpy(self.x_last[real_idx].copy())
 
-        # 2. Static
+        # 2. Ego Static
         if self.use_ego_static and self.ego_static is not None:
             estat = torch.from_numpy(self.ego_static[real_idx].copy())
             estat = estat.unsqueeze(0).expand(x_hist.shape[0], -1)
             x_hist = torch.cat([x_hist, estat], dim=-1)
 
-        # 3. Neighbors
+        # 3. Neighbors (Slicing 로직 적용)
         if self.use_neighbors:
-            x_nb = torch.from_numpy(self.x_nb[real_idx].copy())
+            # 전체 Feature(최대 9차원)를 가져온 뒤 필요한 부분만 Slicing
+            raw_nb = torch.from_numpy(self.x_nb[real_idx].copy()) 
             nb_mask = torch.from_numpy(self.mask[real_idx].copy())
             
+            # (1) 기본 Kinematics (0~5)
+            nb_parts = [raw_nb[..., :6]]
+            
+            # (2) 추가 Feature (Index 6: LC, 7: DxTime, 8: Gate)
+            if self.use_lc_state:
+                nb_parts.append(raw_nb[..., 6:7])
+            if self.use_dxtime:
+                nb_parts.append(raw_nb[..., 7:8])
+            if self.use_gate:
+                nb_parts.append(raw_nb[..., 8:9])
+            
+            x_nb = torch.cat(nb_parts, dim=-1)
+            
+            # (3) Nb Static
             if self.use_nb_static and self.nb_static is not None:
                 nstat = torch.from_numpy(self.nb_static[real_idx].copy())
                 x_nb = torch.cat([x_nb, nstat], dim=-1)
         else:
-            # Ablation (Shape only)
+            # Neighbors 미사용 시 (Shape만 유지)
+            d_dyn = 6 + int(self.use_lc_state) + int(self.use_dxtime) + int(self.use_gate)
+            
             nb_shape = self.x_nb[real_idx].shape
-            mask_shape = self.mask[real_idx].shape
+            T, K, _ = nb_shape
+            
             if self.use_nb_static and self.nb_static is not None:
-                d_dyn = nb_shape[-1]
                 d_stat = self.nb_static[real_idx].shape[-1]
-                x_nb = torch.zeros((nb_shape[0], nb_shape[1], d_dyn + d_stat), dtype=torch.float32)
+                x_nb = torch.zeros((T, K, d_dyn + d_stat), dtype=torch.float32)
             else:
-                x_nb = torch.zeros(nb_shape, dtype=torch.float32)
-            nb_mask = torch.zeros(mask_shape, dtype=torch.bool)
+                x_nb = torch.zeros((T, K, d_dyn), dtype=torch.float32)
+            nb_mask = torch.zeros((T, K), dtype=torch.bool)
 
-        # 4. Normalize
-        if self.stats:
+        # 4. Normalize (수정됨: is_pre_normalized 체크)
+        # 데이터가 미리 정규화되어 있다면 이 단계를 건너뛰어 CPU 연산을 절약합니다.
+        if (not self.is_pre_normalized) and self.stats:
             if self._ego_mean is not None:
                 x_hist = (x_hist - self._ego_mean) / self._ego_std.clamp_min(1e-2)
             if self.use_neighbors and self._nb_mean is not None:
@@ -126,6 +158,7 @@ class MmapDataset(Dataset):
         if self.y_vel is not None:
             out["y_vel"] = torch.from_numpy(self.y_vel[real_idx].copy())
         else:
+            # 없는 경우 0으로 채움 (평가 시 에러 방지)
             out["y_vel"] = torch.zeros_like(y_fut)
 
         if self.y_acc is not None:
