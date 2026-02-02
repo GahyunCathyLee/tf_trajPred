@@ -98,10 +98,22 @@ def main() -> None:
     # -------------------------
     # 2. Config & Features
     # -------------------------
+
     feat_cfg = cfg.get("features", {})
     use_ego_static = bool(feat_cfg.get("use_ego_static", True))
     use_nb_static = bool(feat_cfg.get("use_nb_static", True))
     use_neighbors = bool(cfg.get("model", {}).get("use_neighbors", True))
+    
+    # [NEW] Granular Toggles
+    use_lc_state = bool(feat_cfg.get("use_lc_state", True))
+    use_dxtime = bool(feat_cfg.get("use_dxtime", True))
+    use_gate = bool(feat_cfg.get("use_gate", True))
+
+    print("==== Feature Toggles ====")
+    print(f"use_neighbors  = {use_neighbors}")
+    print(f"use_lc_state   = {use_lc_state}")
+    print(f"use_dxtime     = {use_dxtime}")
+    print(f"use_gate       = {use_gate}")
 
     # Scenario Sampling Check (Used for return_meta decision)
     labels_lut = None
@@ -145,15 +157,24 @@ def main() -> None:
     # -------------------------
     # 4. Stats Loading (Ablation Support)
     # -------------------------
-    print(f"[INFO] Loading Stats (EgoStatic={use_ego_static}, NbStatic={use_nb_static}, Neighbors={use_neighbors})")
+    print(f"[INFO] Loading Stats...")
+    stats_kwargs = {
+        "use_ego_static": use_ego_static,
+        "use_nb_static": use_nb_static,
+        "use_neighbors": use_neighbors,
+        "use_lc_state": use_lc_state,
+        "use_dxtime": use_dxtime,
+        "use_gate": use_gate
+    }
+    
     stats = None
     if mode == "exid":
-        stats = load_stats_for_ablation(exid_dir, use_ego_static, use_nb_static, use_neighbors)
+        stats = load_stats_for_ablation(exid_dir, **stats_kwargs)
     elif mode == "highd":
-        stats = load_stats_for_ablation(highd_dir, use_ego_static, use_nb_static, use_neighbors)
+        stats = load_stats_for_ablation(highd_dir, **stats_kwargs)
     else: # combined
-        s1 = load_stats_for_ablation(exid_dir, use_ego_static, use_nb_static, use_neighbors)
-        s2 = load_stats_for_ablation(highd_dir, use_ego_static, use_nb_static, use_neighbors)
+        s1 = load_stats_for_ablation(exid_dir, **stats_kwargs)
+        s2 = load_stats_for_ablation(highd_dir, **stats_kwargs)
         if s1 and s2:
             stats = {}
             for k in s1:
@@ -184,6 +205,9 @@ def main() -> None:
         "use_ego_static": use_ego_static,
         "use_nb_static": use_nb_static,
         "use_neighbors": use_neighbors,
+        "use_lc_state": use_lc_state, # Add
+        "use_dxtime": use_dxtime,     # Add
+        "use_gate": use_gate,         # Add
         "stats": stats,
         "return_meta": use_scenario_sampling
     }
@@ -192,27 +216,32 @@ def main() -> None:
         "use_ego_static": use_ego_static,
         "use_nb_static": use_nb_static,
         "use_neighbors": use_neighbors,
+        "use_lc_state": use_lc_state, # Add
+        "use_dxtime": use_dxtime,     # Add
+        "use_gate": use_gate,         # Add
         "stats": stats,
         "return_meta": True
     }
+    
+    data_tag = "T2_Tf5_hz3"
 
     if mode == "combined":
         # Train Sets
-        tr_exid = MmapDataset(exid_dir, "exid", dataset_name="exid", **train_kwargs)
-        tr_highd = MmapDataset(highd_dir, "highd", dataset_name="highd", **train_kwargs)
+        tr_exid = MmapDataset(exid_dir, data_tag, dataset_name="exid", **train_kwargs)
+        tr_highd = MmapDataset(highd_dir, data_tag, dataset_name="highd", **train_kwargs)
         full_train_ds = ConcatDataset([tr_exid, tr_highd])
         
         # Val Sets 
-        va_exid = MmapDataset(exid_dir, "exid", dataset_name="exid", **val_kwargs)
-        va_highd = MmapDataset(highd_dir, "highd", dataset_name="highd", **val_kwargs)
+        va_exid = MmapDataset(exid_dir, data_tag, dataset_name="exid", **val_kwargs)
+        va_highd = MmapDataset(highd_dir, data_tag, dataset_name="highd", **val_kwargs)
         full_val_ds = ConcatDataset([va_exid, va_highd])
         
     elif mode == "exid":
-        full_train_ds = MmapDataset(exid_dir, "exid", dataset_name="exid", **train_kwargs)
-        full_val_ds = MmapDataset(exid_dir, "exid", dataset_name="exid", **val_kwargs)
+        full_train_ds = MmapDataset(exid_dir, data_tag, dataset_name="exid", **train_kwargs)
+        full_val_ds = MmapDataset(exid_dir, data_tag, dataset_name="exid", **val_kwargs)
     else:
-        full_train_ds = MmapDataset(highd_dir, "highd", dataset_name="highd", **train_kwargs)
-        full_val_ds = MmapDataset(highd_dir, "highd", dataset_name="highd", **val_kwargs)
+        full_train_ds = MmapDataset(highd_dir, data_tag, dataset_name="highd", **train_kwargs)
+        full_val_ds = MmapDataset(highd_dir, data_tag, dataset_name="highd", **val_kwargs)
 
     # Subset Creation
     train_ds = Subset(full_train_ds, train_idx)
