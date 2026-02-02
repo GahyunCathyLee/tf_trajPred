@@ -25,10 +25,14 @@ def load_stats_for_ablation(
     stats_dir: Path, 
     use_ego_static: bool, 
     use_nb_static: bool, 
-    use_neighbors: bool
+    use_neighbors: bool,
+    # [NEW] Granular Toggles
+    use_lc_state: bool = True,
+    use_dxtime: bool = True,
+    use_gate: bool = True,
 ) -> Optional[Dict[str, torch.Tensor]]:
     """
-    Ablation Config에 따라 Dynamic/Static 통계를 조립하여 반환.
+    Load master stats and slice them according to active toggles.
     """
     stats_path = stats_dir / "stats.npz"
     if not stats_path.exists():
@@ -36,7 +40,9 @@ def load_stats_for_ablation(
 
     d = np.load(str(stats_path))
     
-    # 1. Ego Stats
+    # 1. Ego Stats (Assuming standard 13 dims)
+    # If your stats were computed with use_lead (safety), verify indices. 
+    # Usually dataset handles safety concat, but here we assume stats match base feature set.
     ego_mean = torch.from_numpy(d["dyn_ego_mean"])
     ego_std = torch.from_numpy(d["dyn_ego_std"])
     
@@ -51,8 +57,27 @@ def load_stats_for_ablation(
     nb_std = None
     
     if use_neighbors:
-        nb_mean = torch.from_numpy(d["dyn_nb_mean"])
-        nb_std = torch.from_numpy(d["dyn_nb_std"])
+        # Raw Loaded (Expected 9 dims: 6 kin + 3 extra)
+        raw_n_mean = torch.from_numpy(d["dyn_nb_mean"])
+        raw_n_std = torch.from_numpy(d["dyn_nb_std"])
+        
+        # Slicing Indices
+        # Always take 0-6 (Kinematics)
+        indices = list(range(6))
+        
+        # Check dims and append indices
+        current_dim = raw_n_mean.shape[0]
+        
+        # Assuming saved order: [Kin(6), LC(1), DxTime(1), Gate(1)]
+        if use_lc_state and current_dim > 6:
+            indices.append(6)
+        if use_dxtime and current_dim > 7:
+            indices.append(7)
+        if use_gate and current_dim > 8:
+            indices.append(8)
+            
+        nb_mean = raw_n_mean[indices]
+        nb_std = raw_n_std[indices]
         
         if use_nb_static and "stat_nb_mean" in d:
             ns_mean = torch.from_numpy(d["stat_nb_mean"])
