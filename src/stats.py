@@ -1,4 +1,4 @@
-#src/stats.py
+# src/stats.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,31 +21,43 @@ def load_stats_npz_strict(stats_path: Path) -> Dict[str, torch.Tensor]:
             raise RuntimeError(f"[STATS] missing key '{k}' in {stats_path}")
     return stats
 
+
 def make_stats_filename(
     tag: str,
     use_ego_static: bool,
     use_nb_static: bool,
-    use_lc: bool,
     use_lead: bool,
+    use_lc_state: bool,
+    use_dxtime: bool,
+    use_gate: bool,
 ) -> str:
     """
     Naming rule:
       - all on -> {tag}.npz
       - otherwise append suffix for disabled toggles in fixed order:
-          _e0  (ego_static off)
-          _n0  (nb_static off)
-          _lc0 (lane-change features off)
-          _ld0 (lead/safety features off)
+          _e0   (ego_static off)
+          _n0   (nb_static off)
+          _ld0  (lead/safety features off)
+          _lcs0 (lc_state off)
+          _dxt0 (dx_time off)
+          _gt0  (gate off)
     """
     suffix = ""
     if not use_ego_static:
         suffix += "_e0"
     if not use_nb_static:
         suffix += "_n0"
-    if not use_lc:
-        suffix += "_lc0"
     if not use_lead:
         suffix += "_ld0"
+        
+    # Granular toggles suffixes
+    if not use_lc_state:
+        suffix += "_lcs0"
+    if not use_dxtime:
+        suffix += "_dxt0"
+    if not use_gate:
+        suffix += "_gt0"
+        
     return f"{tag}{suffix}.npz"
 
 
@@ -53,6 +65,7 @@ def _as_list(x: Union[Path, Sequence[Path]]) -> List[Path]:
     if isinstance(x, (list, tuple)):
         return [Path(p) for p in x]
     return [Path(x)]
+
 
 def compute_stats_if_needed(
     *,
@@ -64,8 +77,10 @@ def compute_stats_if_needed(
     num_workers: int,
     use_ego_static: bool,
     use_nb_static: bool,
-    use_lc: bool,
     use_lead: bool,
+    use_lc_state: bool,
+    use_dxtime: bool,
+    use_gate: bool,
 ) -> None:
 
     if stats_path.exists():
@@ -102,10 +117,16 @@ def compute_stats_if_needed(
         cmd.append("--use_ego_static")
     if use_nb_static:
         cmd.append("--use_nb_static")
-    if use_lc:
-        cmd.append("--use_lc")
     if use_lead:
         cmd.append("--use_lead")
+
+    # Granular toggles
+    if use_lc_state:
+        cmd.append("--use_lc_state")
+    if use_dxtime:
+        cmd.append("--use_dxtime")
+    if use_gate:
+        cmd.append("--use_gate")
 
     print("[INFO] Auto-computing stats with command:")
     print("  " + " ".join(cmd))

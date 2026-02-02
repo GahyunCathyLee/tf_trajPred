@@ -30,24 +30,20 @@ from src.scenarios import load_window_labels_csv, build_sample_weights
 def _expected_dims(
     use_ego_static: bool,
     use_nb_static: bool,
-    use_lc: bool,
     use_lead: bool,
+    use_lc_state: bool,
+    use_dxtime: bool,
+    use_gate: bool,
 ) -> tuple[int, int]:
-    """
-    Based on your latest schema:
-      ego_hist = 13
-      ego_safety = 5 (use_lead)
-      ego_static = 10 (use_ego_static)
-
-      nb_hist kin = 6
-      nb_lc = 3 (use_lc)
-      nb_static = 10 (use_nb_static)
-
-    -> ego_dim = 13 + (5 if use_lead else 0) + (10 if use_ego_static else 0)
-    -> nb_dim  =  6 + (3 if use_lc else 0) + (10 if use_nb_static else 0)
-    """
+    # Ego: Base(13) + Lead(5) + Static(10)
     ego_dim = 13 + (5 if use_lead else 0) + (10 if use_ego_static else 0)
-    nb_dim = 6 + (3 if use_lc else 0) + (10 if use_nb_static else 0)
+    
+    # Nb: Kin(6) + 개별토글 + Static(10)
+    nb_dim = 6
+    if use_lc_state: nb_dim += 1
+    if use_dxtime: nb_dim += 1
+    if use_gate: nb_dim += 1
+    if use_nb_static: nb_dim += 10
     return ego_dim, nb_dim
 
 
@@ -82,22 +78,24 @@ def main() -> None:
     # -------------------------
     # feature toggles
     # -------------------------
-    feat_cfg = cfg.get("features", {})
-    use_ego_static = bool(feat_cfg.get("use_ego_static", True))
-    use_nb_static = bool(feat_cfg.get("use_nb_static", True))
-    use_lc = bool(feat_cfg.get("use_lc", True))
-    use_lead = bool(feat_cfg.get("use_lead", True))
+    f_cfg = cfg.get("features", {})
+    use_ego_static = f_cfg.get("use_ego_static", True)
+    use_nb_static = f_cfg.get("use_nb_static", True)
+    use_lead = f_cfg.get("use_lead", True)
+    use_lc_state = f_cfg.get("use_lc_state", True)
+    use_dxtime = f_cfg.get("use_dxtime", True)
+    use_gate = f_cfg.get("use_gate", True)
+
+    ego_dim_exp, nb_dim_exp = _expected_dims(use_ego_static, use_nb_static, use_lead, use_lc_state, use_dxtime, use_gate)
 
     print("==== Feature Toggles ====")
     print(f"use_ego_static = {use_ego_static}")
     print(f"use_nb_static  = {use_nb_static}")
-    print(f"use_lc         = {use_lc}")
+    print(f"use_lc_state      = {use_lc_state}")
+    print(f"use_dxtime  = {use_dxtime}")
+    print(f"use_gate    = {use_gate}")
     print(f"use_lead       = {use_lead}")
 
-    # -------------------------
-    # expected dims check (IMPORTANT)
-    # -------------------------
-    ego_dim_exp, nb_dim_exp = _expected_dims(use_ego_static, use_nb_static, use_lc, use_lead)
 
     ego_dim_cfg = int(cfg.get("model", {}).get("ego_dim", ego_dim_exp))
     nb_dim_cfg = int(cfg.get("model", {}).get("nb_dim", nb_dim_exp))
@@ -140,9 +138,14 @@ def main() -> None:
     num_workers = int(cfg.get("data", {}).get("num_workers", 8))
 
     # -------------------------
-    # stats per-toggle
+    # stats per-toggle (수정됨)
     # -------------------------
-    stats_fname = make_stats_filename(tag, use_ego_static, use_nb_static, use_lc, use_lead)
+    # make_stats_filename 함수도 인자 변경 필요
+    stats_fname = make_stats_filename(
+        tag, use_ego_static, use_nb_static, 
+        use_lc_state, use_dxtime, use_gate, # use_lc 대신 3개 전달
+        use_lead
+    )
 
     if mode == "exid":
         stats_path = Path("./data/exiD/stats") / stats_fname
@@ -155,8 +158,10 @@ def main() -> None:
             num_workers=num_workers,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
-            use_lc=use_lc,
             use_lead=use_lead,
+            use_lc_state=use_lc_state,         # New
+            use_dxtime=use_dxtime, # New
+            use_gate=use_gate,     # New
         )
     elif mode == "highd":
         stats_path = Path("./data/highD/stats") / stats_fname
@@ -169,8 +174,10 @@ def main() -> None:
             num_workers=num_workers,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
-            use_lc=use_lc,
             use_lead=use_lead,
+            use_lc_state=use_lc_state,         # New
+            use_dxtime=use_dxtime, # New
+            use_gate=use_gate,     # New
         )
     else:
         stats_path = Path("./data/combined/stats") / stats_fname
@@ -184,8 +191,10 @@ def main() -> None:
             num_workers=num_workers,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
-            use_lc=use_lc,
             use_lead=use_lead,
+            use_lc_state=use_lc_state,         # New
+            use_dxtime=use_dxtime, # New
+            use_gate=use_gate,     # New
         )
 
     print(f"[INFO] Loading stats: {stats_path}")
@@ -222,8 +231,10 @@ def main() -> None:
             return_meta=True,
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
-            use_lc=use_lc,
             use_lead=use_lead,
+            use_lc_state=use_lc_state,
+            use_dxtime=use_dxtime,
+            use_gate=use_gate,
             dataset_name=ds_name,
         )
 

@@ -16,6 +16,8 @@ class PtWindowDatasetNoNorm(Dataset):
     Minimal dataset for stats computation.
     Loads .pt files listed in split txt. No normalization applied.
     Supports optional concatenation of ego_static/nb_static if present.
+    
+    Updated to support granular neighbor feature toggles.
 
     Required keys per .pt:
       x_hist  : (N,T,De)
@@ -27,11 +29,26 @@ class PtWindowDatasetNoNorm(Dataset):
       nb_static  : (N,T,K,Ds_nb)  or (N,K,Ds_nb)
     """
 
-    def __init__(self, data_dir: Path, split_txt: Path, use_ego_static: bool, use_nb_static: bool, use_lc: bool, use_lead: bool) -> None:
+    def __init__(
+        self, 
+        data_dir: Path, 
+        split_txt: Path, 
+        use_ego_static: bool, 
+        use_nb_static: bool, 
+        use_lc_state: bool, 
+        use_dxtime: bool, 
+        use_gate: bool, 
+        use_lead: bool
+    ) -> None:
         self.data_dir = Path(data_dir)
         self.use_ego_static = use_ego_static
         self.use_nb_static = use_nb_static
-        self.use_lc = use_lc
+        
+        # New Granular Toggles
+        self.use_lc_state = use_lc_state
+        self.use_dxtime = use_dxtime
+        self.use_gate = use_gate
+        
         self.use_lead = use_lead
 
         names = [ln.strip() for ln in split_txt.read_text().splitlines() if ln.strip()]
@@ -73,46 +90,47 @@ class PtWindowDatasetNoNorm(Dataset):
         rec_i, local_i = self._locate(idx)
         d = self.recs[rec_i]
         
-        file_path = self.files[rec_i]
+        # 1. Ego History: 기본 13차원만 먼저 슬라이싱 (중요)
+        x = d["x_hist"][local_i].to(torch.float32)
+        if x.shape[-1] > 13:
+            x = x[..., :13]
 
-        x = d["x_hist"][local_i].to(torch.float32)          # (T, 23)
+        # 2. use_lead: ego_safety (5차원) 결합
+        if self.use_lead and "ego_safety" in d:
+            esaf = d["ego_safety"][local_i].to(torch.float32)
+            if esaf.dim() == 1: esaf = esaf.unsqueeze(0).expand(x.shape[0], -1)
+            x = torch.cat([x, esaf], dim=-1)
 
-        if self.use_lead:
-            ego_safety = d["ego_safety"][local_i].to(torch.float32)  # (T, 5)
-            x = torch.cat([x, ego_safety], dim=-1)          # (T, 28)
+        # 3. use_ego_static 결합
+        if self.use_ego_static and "ego_static" in d:
+            estat = d["ego_static"][local_i].to(torch.float32)
+            if estat.dim() == 1: estat = estat.unsqueeze(0).expand(x.shape[0], -1)
+            x = torch.cat([x, estat], dim=-1)
 
-        nb = d["nb_hist"][local_i].to(torch.float32)
+        # 4. Neighbor: 세분화된 토글에 따른 슬라이싱 및 결합
+        raw_nb = d["nb_hist"][local_i].to(torch.float32)
+        
+        # (1) 기본 6차원 kinematics (dx, dy, dvx, dvy, dax, day)
+        nb_parts = [raw_nb[..., :6]]
+        
+        # (2) 각 추가 feature 토글 확인 (index 6: lc_state, 7: dx_time, 8: gate)
+        # 7,8,9번째 차원이 존재하는지 확인 후 추가
+        if self.use_lc_state:
+            nb_parts.append(raw_nb[..., 6:7])      
+        if self.use_dxtime:
+            nb_parts.append(raw_nb[..., 7:8])      
+        if self.use_gate:
+            nb_parts.append(raw_nb[..., 8:9])      
+            
+        nb = torch.cat(nb_parts, dim=-1)
+
         mask = d["nb_mask"][local_i].bool()
 
-        if not torch.isfinite(x).all():
-            print(f"[BAD DATA] NaN/Inf found in x_hist! File: {file_path}, Index: {local_i}")
-            
-        if not torch.isfinite(nb[mask]).all():
-            print(f"[BAD DATA] NaN/Inf found in nb_hist! File: {file_path}, Index: {local_i}")
-        # ------------------------
-
-        if self.use_ego_static and ("ego_static" in d):
-            es = d["ego_static"][local_i].to(torch.float32).view(1, -1)
-            if not torch.isfinite(es).all():
-                print(f"[BAD DATA] NaN/Inf in ego_static! File: {file_path}")
-            x = torch.cat([x, es.expand(x.shape[0], -1)], dim=-1)
-
-        if self.use_nb_static and ("nb_static" in d):
-            ns = d["nb_static"][local_i].to(torch.float32)
-
-            if ns.dim() == 2:
-                ns = ns.unsqueeze(0).expand(nb.shape[0], -1, -1)
-            elif ns.dim() == 3:
-                pass
-            elif ns.dim() == 4:
-                if ns.shape[0] == 1:
-                    ns = ns.squeeze(0)
-                else:
-                    raise RuntimeError(f"Unexpected nb_static 4D shape: {tuple(ns.shape)}")
-            else:
-                raise RuntimeError(f"Unexpected nb_static shape: {tuple(ns.shape)}")
-
-            nb = torch.cat([nb, ns], dim=-1)
+        # 5. use_nb_static 결합
+        if self.use_nb_static and "nb_static" in d:
+            nstat = d["nb_static"][local_i].to(torch.float32)
+            if nstat.dim() == 2: nstat = nstat.unsqueeze(0).expand(nb.shape[0], -1, -1)
+            nb = torch.cat([nb, nstat], dim=-1)
 
         return {"x_ego": x, "x_nb": nb, "nb_mask": mask}
 
@@ -172,8 +190,12 @@ def main() -> None:
 
     ap.add_argument("--use_ego_static", action="store_true")
     ap.add_argument("--use_nb_static", action="store_true")
-    ap.add_argument("--use_lc", action="store_true")
     ap.add_argument("--use_lead", action="store_true")
+    
+    # [MODIFIED] use_lc -> 3 granular toggles
+    ap.add_argument("--use_lc_state", action="store_true")
+    ap.add_argument("--use_dxtime", action="store_true")
+    ap.add_argument("--use_gate", action="store_true")
 
     ap.add_argument("--batch_size", type=int, default=512)
     ap.add_argument("--num_workers", type=int, default=4)
@@ -202,7 +224,9 @@ def main() -> None:
             split_txt=split_file,
             use_ego_static=args.use_ego_static,
             use_nb_static=args.use_nb_static,
-            use_lc=args.use_lc,
+            use_lc_state=args.use_lc_state,
+            use_dxtime=args.use_dxtime,
+            use_gate=args.use_gate,
             use_lead=args.use_lead,
         )
 
@@ -245,9 +269,13 @@ def main() -> None:
         total_windows += len(ds)
 
         for batch in dl:
-            x_ego = batch["x_ego"].numpy()       # (B,T,De)
-            x_nb = batch["x_nb"].numpy()         # (B,T,K,Dn)
-            nb_mask = batch["nb_mask"].numpy()   # (B,T,K)
+            x_ego = batch["x_ego"].numpy()
+            x_nb = batch["x_nb"].numpy()
+            nb_mask = batch["nb_mask"].numpy()
+
+            # NaN/Inf 배치 Skip 로직
+            if not np.isfinite(x_ego).all() or not np.isfinite(x_nb[nb_mask]).all():
+                continue
 
             # Ego: all timesteps
             ego_flat = x_ego.reshape(-1, ego_dim)

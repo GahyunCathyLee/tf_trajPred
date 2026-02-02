@@ -77,8 +77,7 @@ def main():
     cfg = yaml.safe_load(cfg_path.read_text())
 
     batch_size = int(cfg.get("data", {}).get("batch_size", 128))
-    num_workers = int(cfg.get("data", {}).get("num_workers", 2))
-
+    
     set_seed(int(args.seed))
 
     device = torch.device(args.device if torch.cuda.is_available() and args.device.startswith("cuda") else "cpu")
@@ -100,9 +99,21 @@ def main():
     highd_stats_dir = paths.get("highd_stats_dir", Path("./data/highD/stats"))
     combined_stats_dir = paths.get("combined_stats_dir", Path("./data/combined/stats"))
 
-    use_ego_static = bool(cfg.get("features", {}).get("use_ego_static", True))
-    use_nb_static = bool(cfg.get("features", {}).get("use_nb_static", True))
+    # -------------------------
+    # Feature Toggles (FIXED)
+    # -------------------------
+    feat_cfg = cfg.get("features", {})
+    # [중요] Config에서 플래그를 명확히 읽어옵니다.
+    use_ego_static = bool(feat_cfg.get("use_ego_static", True))
+    use_nb_static = bool(feat_cfg.get("use_nb_static", True))
+    use_lc = bool(feat_cfg.get("use_lc", True))
+    use_lead = bool(feat_cfg.get("use_lead", True))
 
+    print("==== Feature Toggles ====")
+    print(f"use_ego_static = {use_ego_static}")
+    print(f"use_nb_static  = {use_nb_static}")
+    print(f"use_lc         = {use_lc}")
+    print(f"use_lead       = {use_lead}")
 
     mode = str(cfg.get("data", {}).get("mode", "exid")).lower()
     if mode not in ("exid", "highd", "combined"):
@@ -116,16 +127,30 @@ def main():
         splits_index_dir = Path("./data/combined/splits")
 
     # -------------------------
-    # stats (subprocess only)
+    # Stats Loading
     # -------------------------
-    stats_fname = make_stats_filename(tag, use_ego_static, use_nb_static)
-
+    # [수정] train.py와 동일하게 모든 플래그를 사용하여 파일명을 생성합니다.
+    # 만약 사용자가 생성한 파일명이 짧은 이름(T2_Tf5_hz3.npz)으로 고정되어 있다면, 
+    # make_stats_filename 함수 내부 로직이나 이 부분을 직접 수정해야 합니다.
+    # 여기서는 train.py와 로직을 통일합니다.
+    stats_fname = make_stats_filename(tag, use_ego_static, use_nb_static, use_lc, use_lead)
+    
+    # [Fallback Check] 만약 긴 이름의 파일이 없고 짧은 이름만 있다면 짧은 이름 시도
+    # (사용자가 T2_Tf5_hz3.npz가 맞다고 했으므로 이에 대한 예외처리 추가)
     if mode == "exid":
         stats_path = exid_stats_dir / stats_fname
     elif mode == "highd":
         stats_path = highd_stats_dir / stats_fname
     else:
         stats_path = combined_stats_dir / stats_fname
+    
+    if not stats_path.exists():
+        # 혹시 짧은 이름 파일이 있는지 확인
+        short_name = f"{tag}.npz"
+        alt_path = stats_path.parent / short_name
+        if alt_path.exists():
+            print(f"[WARN] Specific stats {stats_fname} not found. Falling back to {short_name}")
+            stats_path = alt_path
 
     stats: Optional[Dict[str, torch.Tensor]] = None
     if stats_path.exists():
@@ -138,6 +163,24 @@ def main():
         ego_dim_cfg = int(cfg["model"]["ego_dim"])
         nb_dim_cfg = int(cfg["model"]["nb_dim"])
         assert_stats_match_batch_dims(stats, ego_dim_cfg, nb_dim_cfg, stats_path)
+
+    # -------------------------
+    # Dataset Factory Helper (CRITICAL FIX)
+    # -------------------------
+    def make_ds(pt_dir: Path, split_txt: Optional[Path], ds_name: str):
+        # [핵심 수정] use_ego_static, use_nb_static 등의 플래그를 데이터셋에 '반드시' 전달해야 합니다.
+        # 전달하지 않으면 기본값(False일 수도 있음)으로 로드되어 차원(Static 10차원 누락)이 안 맞게 됩니다.
+        return PtWindowDataset(
+            data_dir=pt_dir,
+            split_txt=split_txt,
+            stats=stats,
+            return_meta=True,
+            use_ego_static=use_ego_static, # 이 부분이 True여야 데이터가 28차원이 됨
+            use_nb_static=use_nb_static,   # 이 부분이 True여야 nb 데이터 차원이 맞음
+            use_lc=use_lc,      
+            use_lead=use_lead, 
+            dataset_name=ds_name,
+        )
 
     # -------------------------
     # Scenario Labels & Config Check
@@ -162,131 +205,68 @@ def main():
     # datasets / loaders setup
     # -------------------------
     eval_targets = []
-    
-    target_split = args.split  # "test" or "val"
+    target_split = args.split
 
     if use_scenario_sampling:
         print(f"\n[DATA-MODE] Scenario Sampling ON -> Loading indices from {splits_index_dir}/{target_split}_indices.npy")
         
-        # 1. 인덱스 로드
         try:
             indices = np.load(splits_index_dir / f"{target_split}_indices.npy")
         except FileNotFoundError:
             raise FileNotFoundError(f"Index file not found. Did you run create_splits.py for mode={mode}?")
 
-        # 2. 전체 데이터셋 로드 (Full Load)
         if mode == "exid":
-            full_ds = PtWindowDataset(exid_pt_dir, split_txt=None, stats=stats, return_meta=True, 
-                                      use_ego_static=use_ego_static, use_nb_static=use_nb_static, dataset_name="exid")
+            full_ds = make_ds(exid_pt_dir, split_txt=None, ds_name="exid")
             test_ds = Subset(full_ds, indices)
             eval_targets.append(("exid", test_ds))
 
         elif mode == "highd":
-            full_ds = PtWindowDataset(highd_pt_dir, split_txt=None, stats=stats, return_meta=True,
-                                      use_ego_static=use_ego_static, use_nb_static=use_nb_static, dataset_name="highd")
+            full_ds = make_ds(highd_pt_dir, split_txt=None, ds_name="highd")
             test_ds = Subset(full_ds, indices)
             eval_targets.append(("highd", test_ds))
 
         else: # combined
-            # (1) Full Datasets 로드
-            exid_full = PtWindowDataset(exid_pt_dir, split_txt=None, stats=stats, return_meta=True, 
-                                        use_ego_static=use_ego_static, use_nb_static=use_nb_static, dataset_name="exid")
-            highd_full = PtWindowDataset(highd_pt_dir, split_txt=None, stats=stats, return_meta=True,
-                                         use_ego_static=use_ego_static, use_nb_static=use_nb_static, dataset_name="highd")
+            exid_full = make_ds(exid_pt_dir, split_txt=None, ds_name="exid")
+            highd_full = make_ds(highd_pt_dir, split_txt=None, ds_name="highd")
             
-            # (2) Combined Dataset 생성
             combined_full = ConcatDataset([exid_full, highd_full])
-            
-            # (3) Combined Eval Target
             combined_subset = Subset(combined_full, indices)
             eval_targets.append(("combined", combined_subset))
             
-            # (4) ExiD Only / HighD Only 분리 (인덱스 기준)
             cutoff = len(exid_full)
-            
-            # exiD에 해당하는 인덱스만 골라내기
             exid_indices = indices[indices < cutoff]
             if len(exid_indices) > 0:
                 exid_subset = Subset(exid_full, exid_indices)
                 eval_targets.append(("exid_only", exid_subset))
             
-            # highD에 해당하는 인덱스만 골라내기 (Offset 보정 필요)
             highd_indices = indices[indices >= cutoff]
             if len(highd_indices) > 0:
-                # highD 개별 데이터셋 기준으로는 인덱스가 0부터 시작해야 하므로 cutoff를 뺌
                 highd_subset = Subset(highd_full, highd_indices - cutoff)
                 eval_targets.append(("highd_only", highd_subset))
 
     else:
-        # [OLD WAY] 기존 텍스트 파일 기반 로딩
         print(f"\n[DATA-MODE] Scenario Sampling OFF -> Loading files via {target_split}.txt")
         
         if mode == "exid":
-            test_ds = PtWindowDataset(
-                data_dir=exid_pt_dir,
-                split_txt=exid_splits_dir / f"{target_split}.txt",
-                stats=stats,
-                return_meta=True,
-                use_ego_static=use_ego_static,
-                use_nb_static=use_nb_static,
-                dataset_name="exid",
-            )
+            test_ds = make_ds(exid_pt_dir, split_txt=exid_splits_dir / f"{target_split}.txt", ds_name="exid")
             eval_targets.append(("exid", test_ds))
 
         elif mode == "highd":
-            test_ds = PtWindowDataset(
-                data_dir=highd_pt_dir,
-                split_txt=highd_splits_dir / f"{target_split}.txt",
-                stats=stats,
-                return_meta=True,
-                use_ego_static=use_ego_static,
-                use_nb_static=use_nb_static,
-                dataset_name="highd",
-            )
+            test_ds = make_ds(highd_pt_dir, split_txt=highd_splits_dir / f"{target_split}.txt", ds_name="highd")
             eval_targets.append(("highd", test_ds))
 
         else: # combined
-            exid_test_ds = PtWindowDataset(
-                data_dir=exid_pt_dir,
-                split_txt=exid_splits_dir / f"{target_split}.txt",
-                stats=stats,
-                return_meta=True,
-                use_ego_static=use_ego_static,
-                use_nb_static=use_nb_static,
-                dataset_name="exid",
-            )
-            highd_test_ds = PtWindowDataset(
-                data_dir=highd_pt_dir,
-                split_txt=highd_splits_dir / f"{target_split}.txt",
-                stats=stats,
-                return_meta=True,
-                use_ego_static=use_ego_static,
-                use_nb_static=use_nb_static,
-                dataset_name="highd",
-            )
+            exid_test_ds = make_ds(exid_pt_dir, split_txt=exid_splits_dir / f"{target_split}.txt", ds_name="exid")
+            highd_test_ds = make_ds(highd_pt_dir, split_txt=highd_splits_dir / f"{target_split}.txt", ds_name="highd")
+            
             combined_ds = ConcatDataset([exid_test_ds, highd_test_ds])
-
             eval_targets.append(("combined", combined_ds))
             eval_targets.append(("exid_only", exid_test_ds))
             eval_targets.append(("highd_only", highd_test_ds))
 
     # -------------------------
-    # Loop over targets
+    # Setup Model & Eval
     # -------------------------
-    labels_lut = None
-    labels_cfg = cfg.get("data", {}).get("scenario_labels", None)
-    if labels_cfg:
-        if isinstance(labels_cfg, str):
-            labels_lut = load_window_labels_csv(Path(labels_cfg))
-        elif isinstance(labels_cfg, dict):
-            merged = {}
-            if "exid" in labels_cfg:
-                merged.update(load_window_labels_csv(Path(labels_cfg["exid"])))
-            if "highd" in labels_cfg:
-                merged.update(load_window_labels_csv(Path(labels_cfg["highd"])))
-            labels_lut = merged
-
-
     model = build_model(cfg).to(device)
     state_dict = _load_ckpt_state_dict(Path(args.ckpt))
     model.load_state_dict(state_dict, strict=True)
@@ -298,6 +278,10 @@ def main():
     epoch_for_csv = args.epoch if args.epoch is not None else -1
     data_hz = float(cfg.get("data", {}).get("hz", 0.0))
 
+    # [Check] Config vs Actual
+    ego_dim_cfg = int(cfg["model"]["ego_dim"])
+    nb_dim_cfg = int(cfg["model"]["nb_dim"])
+    print(f"[INFO] Model config expects: ego_dim={ego_dim_cfg}, nb_dim={nb_dim_cfg}")
 
     for target_name, target_ds in eval_targets:
         print(f"\n{'='*10} Evaluating: {target_name} (Size: {len(target_ds)}) {'='*10}")
@@ -306,11 +290,11 @@ def main():
             target_ds,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
+            num_workers=args.num_workers,
             pin_memory=(device.type == "cuda"),
             drop_last=False,
             collate_fn=collate_batch,
-            persistent_workers=(num_workers > 0),
+            persistent_workers=(args.num_workers > 0),
         )
 
         curr_save_event = None
@@ -342,7 +326,6 @@ def main():
             latency_iters=200,
             latency_warmup=30,
             latency_per_sample=True,
-            # [NEW] Pass paths
             cfg_path=cfg_path,
             ckpt_path=Path(args.ckpt),
         )
@@ -360,7 +343,7 @@ def main():
                 tag=tag,
                 device=str(device),
                 batch_size=int(batch_size),
-                num_workers=int(num_workers),
+                num_workers=int(args.num_workers),
                 seed=int(args.seed),
                 use_amp=bool(args.use_amp),
                 stats_path=stats_path,
