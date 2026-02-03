@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Union
+from typing import Dict, Iterable, List, Sequence, Union, Optional
 
 import numpy as np
 import torch
@@ -26,7 +26,6 @@ def load_stats_for_ablation(
     use_ego_static: bool, 
     use_nb_static: bool, 
     use_neighbors: bool,
-    # [NEW] Granular Toggles
     use_lc_state: bool = True,
     use_dxtime: bool = True,
     use_gate: bool = True,
@@ -92,21 +91,36 @@ def load_stats_for_ablation(
         "nb_std": nb_std
     }
 
-def make_stats_filename(tag: str, use_ego_static: bool, use_nb_static: bool) -> str:
-    """
-    Naming rule:
-      - es=1 & ns=1 -> {tag}.npz
-      - es=0 & ns=1 -> {tag}_e0.npz
-      - es=1 & ns=0 -> {tag}_n0.npz
-      - es=0 & ns=0 -> {tag}_e0n0.npz
-    """
-    if use_ego_static and use_nb_static:
-        return f"{tag}.npz"
-    if (not use_ego_static) and use_nb_static:
-        return f"{tag}_e0.npz"
-    if use_ego_static and (not use_nb_static):
-        return f"{tag}_n0.npz"
-    return f"{tag}_e0n0.npz"
+def make_stats_filename(
+    *,
+    tag: str,
+    use_neighbors: bool,
+    use_ego_static: bool,
+    use_nb_static: bool,
+    use_lead: bool,
+    use_lc_state: bool,
+    use_dxtime: bool,
+    use_gate: bool,
+) -> str:
+    suffix = ""
+    if not use_ego_static:
+        suffix += "_e0"
+    if not use_nb_static:
+        suffix += "_n0"
+    if not use_lead:
+        suffix += "_ld0"
+
+    if not use_neighbors:
+        suffix += "_nbr0"
+
+    if not use_lc_state:
+        suffix += "_lcs0"
+    if not use_dxtime:
+        suffix += "_dxt0"
+    if not use_gate:
+        suffix += "_gt0"
+
+    return f"{tag}{suffix}.npz"
 
 
 def _as_list(x: Union[Path, Sequence[Path]]) -> List[Path]:
@@ -122,8 +136,14 @@ def compute_stats_if_needed(
     stats_split: str,
     batch_size: int,
     num_workers: int,
+    data_tag: str,           # ✅ NEW: tag 충돌 피하려고 data_tag로
+    use_neighbors: bool,
     use_ego_static: bool,
     use_nb_static: bool,
+    use_lead: bool,
+    use_lc_state: bool,
+    use_dxtime: bool,
+    use_gate: bool,
 ) -> None:
 
     if stats_path.exists():
@@ -140,7 +160,9 @@ def compute_stats_if_needed(
         )
 
     root = Path(__file__).resolve().parents[1]
-    compute_stats_py = root / "scripts" / "compute_stats.py"
+
+    # ✅ mmap용 stats 스크립트 호출
+    compute_stats_py = root / "scripts" / "compute_stats_mmap.py"
     if not compute_stats_py.exists():
         raise FileNotFoundError(f"Missing: {compute_stats_py}")
 
@@ -148,6 +170,7 @@ def compute_stats_if_needed(
         sys.executable, str(compute_stats_py),
         "--split", str(stats_split),
         "--out", str(stats_path),
+        "--data_tag", str(data_tag),            # ✅ NEW
         "--batch_size", str(int(batch_size)),
         "--num_workers", str(int(num_workers)),
     ]
@@ -156,12 +179,25 @@ def compute_stats_if_needed(
         cmd += ["--data_dir", str(dd)]
         cmd += ["--splits_dir", str(sd)]
 
+    if use_neighbors:
+        cmd.append("--use_neighbors")
+
     if use_ego_static:
         cmd.append("--use_ego_static")
     if use_nb_static:
         cmd.append("--use_nb_static")
+    if use_lead:
+        cmd.append("--use_lead")
 
-    print("[INFO] Auto-computing stats with command:")
+    # Granular toggles
+    if use_lc_state:
+        cmd.append("--use_lc_state")
+    if use_dxtime:
+        cmd.append("--use_dxtime")
+    if use_gate:
+        cmd.append("--use_gate")
+
+    print("[INFO] Auto-computing MMAP stats with command:")
     print("  " + " ".join(cmd))
 
     stats_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,12 +205,12 @@ def compute_stats_if_needed(
     import subprocess
     r = subprocess.run(cmd, cwd=str(root))
     if r.returncode != 0:
-        raise RuntimeError(f"compute_stats failed with return code {r.returncode}")
+        raise RuntimeError(f"compute_stats_mmap failed with return code {r.returncode}")
 
     if not stats_path.exists():
-        raise RuntimeError(f"compute_stats finished but stats file not found: {stats_path}")
+        raise RuntimeError(f"compute_stats_mmap finished but stats file not found: {stats_path}")
 
-    print(f"[INFO] Stats generated: {stats_path}")
+    print(f"[INFO] MMAP Stats generated: {stats_path}")
 
 
 def assert_stats_match_batch_dims(

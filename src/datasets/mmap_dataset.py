@@ -20,12 +20,10 @@ class MmapDataset(Dataset):
         use_ego_static: bool = True,
         use_nb_static: bool = True,
         use_neighbors: bool = True,
-        # [추가 1] 세부 Feature Toggle
         use_lc_state: bool = True,
         use_dxtime: bool = True,
         use_gate: bool = True,
         dataset_name: Optional[str] = None,
-        # [추가 2] 미리 정규화된 데이터인지 여부 (서버에서는 기본값 True 권장)
         is_pre_normalized: bool = True, 
     ):
         self.data_dir = Path(data_dir)
@@ -123,22 +121,20 @@ class MmapDataset(Dataset):
             # (3) Nb Static
             if self.use_nb_static and self.nb_static is not None:
                 nstat = torch.from_numpy(self.nb_static[real_idx].copy())
+
+                if nstat.ndim == 2:  # (K, D) -> (T, K, D)
+                    nstat = nstat.unsqueeze(0).expand(x_nb.shape[0], -1, -1)
+                elif nstat.ndim != 3:
+                    raise RuntimeError(f"nb_static shape unexpected: {tuple(nstat.shape)}")
+
                 x_nb = torch.cat([x_nb, nstat], dim=-1)
         else:
-            # Neighbors 미사용 시 (Shape만 유지)
-            d_dyn = 6 + int(self.use_lc_state) + int(self.use_dxtime) + int(self.use_gate)
-            
             nb_shape = self.x_nb[real_idx].shape
             T, K, _ = nb_shape
-            
-            if self.use_nb_static and self.nb_static is not None:
-                d_stat = self.nb_static[real_idx].shape[-1]
-                x_nb = torch.zeros((T, K, d_dyn + d_stat), dtype=torch.float32)
-            else:
-                x_nb = torch.zeros((T, K, d_dyn), dtype=torch.float32)
+            x_nb = torch.zeros((T, K, 0), dtype=torch.float32)
             nb_mask = torch.zeros((T, K), dtype=torch.bool)
 
-        # 4. Normalize (수정됨: is_pre_normalized 체크)
+        # 4. Normalize
         # 데이터가 미리 정규화되어 있다면 이 단계를 건너뛰어 CPU 연산을 절약합니다.
         if (not self.is_pre_normalized) and self.stats:
             if self._ego_mean is not None:
@@ -158,7 +154,6 @@ class MmapDataset(Dataset):
         if self.y_vel is not None:
             out["y_vel"] = torch.from_numpy(self.y_vel[real_idx].copy())
         else:
-            # 없는 경우 0으로 채움 (평가 시 에러 방지)
             out["y_vel"] = torch.zeros_like(y_fut)
 
         if self.y_acc is not None:
