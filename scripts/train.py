@@ -115,7 +115,7 @@ def main() -> None:
     print(f"use_nb_static  = {use_nb_static}")
     print(f"use_lc_state   = {use_lc_state}")
     print(f"use_dxtime     = {use_dxtime}")
-    print(f"use_gate       = {use_gate}")
+    print(f"use_gate       = {use_gate}\n")
 
     # Scenario Sampling Check (Used for return_meta decision)
     labels_lut = None
@@ -205,10 +205,11 @@ def main() -> None:
         use_gate=use_gate,
     )
 
+    stats = load_stats_npz_strict(stats_path)
+
     if stats is None:
         print("[WARN] Stats not found. Training without normalization.")
     else:
-        stats = load_stats_npz_strict(stats_path)
         print("[INFO] Stats loaded successfully.")
 
     # -------------------------
