@@ -32,7 +32,8 @@ class PtWindowDatasetNoNorm(Dataset):
     def __init__(
         self, 
         data_dir: Path, 
-        split_txt: Path, 
+        split_txt: Path,
+        use_neighbors: bool, 
         use_ego_static: bool, 
         use_nb_static: bool, 
         use_lc_state: bool, 
@@ -41,10 +42,10 @@ class PtWindowDatasetNoNorm(Dataset):
         use_lead: bool
     ) -> None:
         self.data_dir = Path(data_dir)
+        self.use_neighbors = use_neighbors
         self.use_ego_static = use_ego_static
         self.use_nb_static = use_nb_static
         
-        # New Granular Toggles
         self.use_lc_state = use_lc_state
         self.use_dxtime = use_dxtime
         self.use_gate = use_gate
@@ -131,6 +132,10 @@ class PtWindowDatasetNoNorm(Dataset):
             nstat = d["nb_static"][local_i].to(torch.float32)
             if nstat.dim() == 2: nstat = nstat.unsqueeze(0).expand(nb.shape[0], -1, -1)
             nb = torch.cat([nb, nstat], dim=-1)
+        
+        if not self.use_neighbors:
+            nb_hist = nb_hist[..., :0]
+            nb_mask = torch.zeros_like(nb_mask, dtype=torch.bool)
 
         return {"x_ego": x, "x_nb": nb, "nb_mask": mask}
 
@@ -188,6 +193,7 @@ def main() -> None:
     ap.add_argument("--split", type=str, default="train")
     ap.add_argument("--out", type=str, required=True)
 
+    ap.add_argument("--use_neighbors", action="store_true")
     ap.add_argument("--use_ego_static", action="store_true")
     ap.add_argument("--use_nb_static", action="store_true")
     ap.add_argument("--use_lead", action="store_true")
@@ -286,17 +292,24 @@ def main() -> None:
             nb_flat = x_nb.reshape(B * T * K, Dn)
             mask_flat = nb_mask.reshape(B * T * K)
             nb_valid = nb_flat[mask_flat]
-            nb_count, nb_mean, nb_m2 = welford_merge(nb_count, nb_mean, nb_m2, nb_valid)
+
+            if nb_valid.shape[0] > 0:
+                nb_count, nb_mean, nb_m2 = welford_merge(nb_count, nb_mean, nb_m2, nb_valid)
 
     assert ego_dim is not None and nb_dim is not None
     assert ego_mean is not None and ego_m2 is not None
     assert nb_mean is not None and nb_m2 is not None
 
     ego_var = ego_m2 / max(ego_count - 1, 1)
-    nb_var = nb_m2 / max(nb_count - 1, 1)
-
     ego_std = np.sqrt(np.maximum(ego_var, 1e-12)).astype(np.float32)
-    nb_std = np.sqrt(np.maximum(nb_var, 1e-12)).astype(np.float32)
+
+    if nb_count == 0:
+        # nb_dim이 0이거나(=use_neighbors=False로 nb_dim=0), 또는 mask가 전부 false인 특이 케이스
+        nb_mean = np.zeros((nb_dim,), dtype=np.float64)
+        nb_std  = np.ones((nb_dim,), dtype=np.float32)
+    else:
+        nb_var = nb_m2 / max(nb_count - 1, 1)
+        nb_std = np.sqrt(np.maximum(nb_var, 1e-12)).astype(np.float32)
 
     print("\n[INSPECTION] Checking for dangerous low-variance features...")
     

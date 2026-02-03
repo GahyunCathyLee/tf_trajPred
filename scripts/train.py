@@ -138,13 +138,16 @@ def main() -> None:
     num_workers = int(cfg.get("data", {}).get("num_workers", 8))
 
     # -------------------------
-    # stats per-toggle (수정됨)
+    # stats per-toggle
     # -------------------------
-    # make_stats_filename 함수도 인자 변경 필요
     stats_fname = make_stats_filename(
-        tag, use_ego_static, use_nb_static, 
-        use_lc_state, use_dxtime, use_gate, # use_lc 대신 3개 전달
-        use_lead
+        tag=tag,
+        use_ego_static=use_ego_static,
+        use_nb_static=use_nb_static,
+        use_lead=use_lead,
+        use_lc_state=use_lc_state,   
+        use_dxtime=use_dxtime,
+        use_gate=use_gate,
     )
 
     if mode == "exid":
@@ -159,9 +162,9 @@ def main() -> None:
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             use_lead=use_lead,
-            use_lc_state=use_lc_state,         # New
-            use_dxtime=use_dxtime, # New
-            use_gate=use_gate,     # New
+            use_lc_state=use_lc_state,        
+            use_dxtime=use_dxtime, 
+            use_gate=use_gate,    
         )
     elif mode == "highd":
         stats_path = Path("./data/highD/stats") / stats_fname
@@ -175,9 +178,9 @@ def main() -> None:
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             use_lead=use_lead,
-            use_lc_state=use_lc_state,         # New
-            use_dxtime=use_dxtime, # New
-            use_gate=use_gate,     # New
+            use_lc_state=use_lc_state,       
+            use_dxtime=use_dxtime,
+            use_gate=use_gate, 
         )
     else:
         stats_path = Path("./data/combined/stats") / stats_fname
@@ -192,9 +195,9 @@ def main() -> None:
             use_ego_static=use_ego_static,
             use_nb_static=use_nb_static,
             use_lead=use_lead,
-            use_lc_state=use_lc_state,         # New
-            use_dxtime=use_dxtime, # New
-            use_gate=use_gate,     # New
+            use_lc_state=use_lc_state,
+            use_dxtime=use_dxtime, 
+            use_gate=use_gate,     
         )
 
     print(f"[INFO] Loading stats: {stats_path}")

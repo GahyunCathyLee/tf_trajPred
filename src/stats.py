@@ -23,6 +23,7 @@ def load_stats_npz_strict(stats_path: Path) -> Dict[str, torch.Tensor]:
 
 
 def make_stats_filename(
+    *, 
     tag: str,
     use_ego_static: bool,
     use_nb_static: bool,
