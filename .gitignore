@@ -7,3 +7,7 @@ ckpts/
 *.npy
 
 __pycache__/
+
+!data/combined/splits/train_indices.npy
+!data/combined/splits/test_indices.npy
+!data/combined/splits/val_indices.npy
