@@ -11,3 +11,11 @@ __pycache__/
 !data/combined/splits/train_indices.npy
 !data/combined/splits/test_indices.npy
 !data/combined/splits/val_indices.npy
+
+!data/exiD/splits/train_indices.npy
+!data/exiD/splits/test_indices.npy
+!data/exiD/splits/val_indices.npy
+
+!data/highD/splits/train_indices.npy
+!data/highD/splits/test_indices.npy
+!data/highD/splits/val_indices.npy
