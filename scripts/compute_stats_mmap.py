@@ -79,6 +79,7 @@ def main() -> None:
     # allow repeated args for combined
     ap.add_argument("--data_dir", action="append", required=True)
     ap.add_argument("--splits_dir", action="append", required=True)
+    ap.add_argument("--tag", type=str, required=True)     
 
     # toggles
     ap.add_argument("--use_neighbors", action="store_true")
@@ -108,6 +109,7 @@ def main() -> None:
     for dd, sd in zip(data_dirs, splits_dirs):
         split_idx = load_split_indices(sd, args.split)
         ds = MmapDataset(
+            tag=args.tag,
             data_dir=dd,
             split_indices=split_idx,
             stats=None,  # IMPORTANT: raw stats
@@ -119,7 +121,6 @@ def main() -> None:
             use_lc_state=args.use_lc_state,
             use_dxtime=args.use_dxtime,
             use_gate=args.use_gate,
-            dataset_name=None,
             is_pre_normalized=False,
         )
         datasets.append(ds)

@@ -136,7 +136,7 @@ def compute_stats_if_needed(
     stats_split: str,
     batch_size: int,
     num_workers: int,
-    data_tag: str,           # ✅ NEW: tag 충돌 피하려고 data_tag로
+    tag: str,        
     use_neighbors: bool,
     use_ego_static: bool,
     use_nb_static: bool,
@@ -170,14 +170,14 @@ def compute_stats_if_needed(
         sys.executable, str(compute_stats_py),
         "--split", str(stats_split),
         "--out", str(stats_path),
-        "--data_tag", str(data_tag),            # ✅ NEW
+        "--tag", str(tag),           
         "--batch_size", str(int(batch_size)),
         "--num_workers", str(int(num_workers)),
     ]
 
     for dd, sd in zip(data_dirs, splits_dirs):
         cmd += ["--data_dir", str(dd)]
-        cmd += ["--splits_dir", str(sd)]
+        cmd += ["--splits_dir", str(sd)]    
 
     if use_neighbors:
         cmd.append("--use_neighbors")

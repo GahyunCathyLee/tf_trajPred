@@ -25,8 +25,6 @@ from src.stats import make_stats_filename, compute_stats_if_needed, load_stats_n
 
 
 def compute_weights_fast(dataset, labels_df, mode="event", alpha=1.0, unknown_w=0.0, clip_max=None):
-    print(f"   -> Fast Weight Computation for {dataset.dataset_name}...")
-    
     # 1. 데이터셋 메타데이터를 DataFrame으로 변환 (메모리 내 배열 활용)
     # MmapDataset은 meta_rec, meta_track, meta_frame을 이미 numpy 배열로 가지고 있음
     df_data = pd.DataFrame({
@@ -189,6 +187,7 @@ def main() -> None:
     stats_path = stats_dir / stats_fname
 
     compute_stats_if_needed(
+        tag=tag,
         stats_path=stats_path,
         data_dir=data_dirs,
         splits_dir=splits_dirs,
@@ -252,22 +251,21 @@ def main() -> None:
     
     if mode == "combined":
         # Train Sets
-        tr_exid = MmapDataset(exid_dir, dataset_name="exid", **train_kwargs)
-        tr_highd = MmapDataset(highd_dir, dataset_name="highd", **train_kwargs)
+        tr_exid = MmapDataset(tag, exid_dir, **train_kwargs)
+        tr_highd = MmapDataset(tag, highd_dir, **train_kwargs)
         full_train_ds = ConcatDataset([tr_exid, tr_highd])
         
         # Val Sets 
-        va_exid = MmapDataset(exid_dir, dataset_name="exid", **val_kwargs)
-        va_highd = MmapDataset(highd_dir, dataset_name="highd", **val_kwargs)
+        va_exid = MmapDataset(tag, exid_dir, **val_kwargs)
+        va_highd = MmapDataset(tag, highd_dir, **val_kwargs)
         full_val_ds = ConcatDataset([va_exid, va_highd])
         
     elif mode == "exid":
-        full_train_ds = MmapDataset(exid_dir, dataset_name="exid", **train_kwargs)
-        full_val_ds = MmapDataset(exid_dir, dataset_name="exid", **val_kwargs)
+        full_train_ds = MmapDataset(tag, exid_dir, **train_kwargs)
+        full_val_ds = MmapDataset(tag, exid_dir, **val_kwargs)
     else:
-        full_train_ds = MmapDataset(highd_dir, dataset_name="highd", **train_kwargs)
-        full_val_ds = MmapDataset(highd_dir, dataset_name="highd", **val_kwargs)
-
+        full_train_ds = MmapDataset(tag, highd_dir, **train_kwargs)
+        full_val_ds = MmapDataset(tag, highd_dir, **val_kwargs)     
     # Subset Creation
     train_ds = Subset(full_train_ds, train_idx)
     val_ds = Subset(full_val_ds, val_idx)
