@@ -73,7 +73,6 @@ def main() -> None:
 
     ap.add_argument("--split", required=True, choices=["train", "val", "test"])
     ap.add_argument("--out", required=True, type=str)
-    ap.add_argument("--data_tag", required=True, type=str)  # same meaning as your "tag"
     ap.add_argument("--batch_size", type=int, default=512)
     ap.add_argument("--num_workers", type=int, default=4)
 
@@ -110,18 +109,18 @@ def main() -> None:
         split_idx = load_split_indices(sd, args.split)
         ds = MmapDataset(
             data_dir=dd,
-            tag=args.data_tag,
             split_indices=split_idx,
             stats=None,  # IMPORTANT: raw stats
             return_meta=False,
             use_ego_static=args.use_ego_static,
             use_nb_static=args.use_nb_static,
             use_neighbors=args.use_neighbors,
+            use_lead=args.use_lead,
             use_lc_state=args.use_lc_state,
             use_dxtime=args.use_dxtime,
             use_gate=args.use_gate,
             dataset_name=None,
-            is_pre_normalized=True,  # stats=None이면 normalize 단계 자체가 수행되지 않음
+            is_pre_normalized=False,
         )
         datasets.append(ds)
 

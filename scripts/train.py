@@ -195,7 +195,6 @@ def main() -> None:
         stats_split="train",
         batch_size=int(cfg.get("data", {}).get("batch_size", 512)),
         num_workers=int(cfg.get("data", {}).get("num_workers", 16)),
-        data_tag=tag,
         use_neighbors=use_neighbors,
         use_ego_static=use_ego_static,
         use_nb_static=use_nb_static,
@@ -229,6 +228,7 @@ def main() -> None:
         "use_ego_static": use_ego_static,
         "use_nb_static": use_nb_static,
         "use_neighbors": use_neighbors,
+        "use_lead": use_lead,
         "use_lc_state": use_lc_state, 
         "use_dxtime": use_dxtime,     
         "use_gate": use_gate,         
@@ -241,6 +241,7 @@ def main() -> None:
         "use_ego_static": use_ego_static,
         "use_nb_static": use_nb_static,
         "use_neighbors": use_neighbors,
+        "use_lead": use_lead,
         "use_lc_state": use_lc_state, 
         "use_dxtime": use_dxtime,     
         "use_gate": use_gate,         
@@ -251,21 +252,21 @@ def main() -> None:
     
     if mode == "combined":
         # Train Sets
-        tr_exid = MmapDataset(exid_dir, tag, dataset_name="exid", **train_kwargs)
-        tr_highd = MmapDataset(highd_dir, tag, dataset_name="highd", **train_kwargs)
+        tr_exid = MmapDataset(exid_dir, dataset_name="exid", **train_kwargs)
+        tr_highd = MmapDataset(highd_dir, dataset_name="highd", **train_kwargs)
         full_train_ds = ConcatDataset([tr_exid, tr_highd])
         
         # Val Sets 
-        va_exid = MmapDataset(exid_dir, tag, dataset_name="exid", **val_kwargs)
-        va_highd = MmapDataset(highd_dir, tag, dataset_name="highd", **val_kwargs)
+        va_exid = MmapDataset(exid_dir, dataset_name="exid", **val_kwargs)
+        va_highd = MmapDataset(highd_dir, dataset_name="highd", **val_kwargs)
         full_val_ds = ConcatDataset([va_exid, va_highd])
         
     elif mode == "exid":
-        full_train_ds = MmapDataset(exid_dir, tag, dataset_name="exid", **train_kwargs)
-        full_val_ds = MmapDataset(exid_dir, tag, dataset_name="exid", **val_kwargs)
+        full_train_ds = MmapDataset(exid_dir, dataset_name="exid", **train_kwargs)
+        full_val_ds = MmapDataset(exid_dir, dataset_name="exid", **val_kwargs)
     else:
-        full_train_ds = MmapDataset(highd_dir, tag, dataset_name="highd", **train_kwargs)
-        full_val_ds = MmapDataset(highd_dir, tag, dataset_name="highd", **val_kwargs)
+        full_train_ds = MmapDataset(highd_dir, dataset_name="highd", **train_kwargs)
+        full_val_ds = MmapDataset(highd_dir, dataset_name="highd", **val_kwargs)
 
     # Subset Creation
     train_ds = Subset(full_train_ds, train_idx)
