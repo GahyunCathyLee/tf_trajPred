@@ -1,3 +1,5 @@
+# src/datasets/mmap_dataset.py
+
 from __future__ import annotations
 import torch
 from torch.utils.data import Dataset
@@ -6,10 +8,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 class MmapDataset(Dataset):
-    """
-    Memory-efficient dataset using memory mapping.
-    Supports pre-normalized data and granular feature toggles.
-    """
     def __init__(
         self,
         tag: str,
@@ -19,7 +17,7 @@ class MmapDataset(Dataset):
         return_meta: bool = False,
         use_ego_static: bool = True,
         use_nb_static: bool = True,
-        use_lead: bool = False,
+        use_lead: bool = False, 
         use_neighbors: bool = True,
         use_lc_state: bool = True,
         use_dxtime: bool = True,
@@ -35,21 +33,34 @@ class MmapDataset(Dataset):
         self.use_neighbors = use_neighbors
         self.use_lead = use_lead
         
-        # Feature Toggle 저장
         self.use_lc_state = use_lc_state
         self.use_dxtime = use_dxtime
         self.use_gate = use_gate
 
         self.is_pre_normalized = is_pre_normalized
 
-        # Mmap Load
+        # 1. Main Ego File (Dimension: 13)
         self.x_ego = np.load(self.data_dir / f"{tag}_x_ego.npy", mmap_mode='r')
+        
+        # 2. Safety File (Dimension: 5) - v0 스크립트가 생성한 파일
+        self.x_safe = None
+        # use_lead가 True일 때만 로드 시도
+        if self.use_lead:
+            safe_path = self.data_dir / f"{tag}_ego_safety.npy"
+            if safe_path.exists():
+                self.x_safe = np.load(safe_path, mmap_mode='r')
+            else:
+                print(f"[WARN] use_lead=True but {safe_path.name} not found. Safety features will be zeros.")
+
+        # 3. Neighbors (Dimension: 9)
         self.x_nb = np.load(self.data_dir / f"{tag}_x_nb.npy", mmap_mode='r')
-        self.y = np.load(self.data_dir / f"{tag}_y.npy", mmap_mode='r')
         self.mask = np.load(self.data_dir / f"{tag}_nb_mask.npy", mmap_mode='r')
+        
+        # 4. Targets & Others
+        self.y = np.load(self.data_dir / f"{tag}_y.npy", mmap_mode='r')
         self.x_last = np.load(self.data_dir / f"{tag}_x_last_abs.npy", mmap_mode='r')
         
-        # Optional Files Load (변동 없음)
+        # Optional Files
         self.y_vel = None
         if (self.data_dir / f"{tag}_y_vel.npy").exists():
             self.y_vel = np.load(self.data_dir / f"{tag}_y_vel.npy", mmap_mode='r')
@@ -68,6 +79,8 @@ class MmapDataset(Dataset):
 
         # Meta Load 
         self.meta_rec = None
+        self.meta_track = None
+        self.meta_frame = None
         if return_meta:
             self.meta_rec = np.load(self.data_dir / f"{tag}_meta_recordingId.npy", mmap_mode='r')
             self.meta_track = np.load(self.data_dir / f"{tag}_meta_trackId.npy", mmap_mode='r')
@@ -88,21 +101,29 @@ class MmapDataset(Dataset):
     def __getitem__(self, idx):
         real_idx = self.indices[idx]
         
-        # 1. Core Data (Ego)
+        # 1. Core Data (Ego) - 13차원
         x_hist = torch.from_numpy(self.x_ego[real_idx].copy())
         y_fut = torch.from_numpy(self.y[real_idx].copy())
         x_last_abs = torch.from_numpy(self.x_last[real_idx].copy())
 
-        if not self.use_lead and x_hist.shape[-1] >= 18:
-            x_hist = torch.cat([x_hist[..., :9], x_hist[..., 14:]], dim=-1)
+        # [수정됨] use_lead=True이면 Safety Feature(5차원)를 뒤에 붙임 -> 총 18차원
+        if self.use_lead:
+            if self.x_safe is not None:
+                x_safe = torch.from_numpy(self.x_safe[real_idx].copy())
+                x_hist = torch.cat([x_hist, x_safe], dim=-1)
+            else:
+                # 파일이 없는데 use_lead=True인 경우 0으로 채움 (Safety Fallback)
+                T = x_hist.shape[0]
+                zeros = torch.zeros((T, 5), dtype=x_hist.dtype)
+                x_hist = torch.cat([x_hist, zeros], dim=-1)
 
-        # 2. Ego Static
+        # 2. Ego Static (뒤에 붙임)
         if self.use_ego_static and self.ego_static is not None:
             estat = torch.from_numpy(self.ego_static[real_idx].copy())
             estat = estat.unsqueeze(0).expand(x_hist.shape[0], -1)
             x_hist = torch.cat([x_hist, estat], dim=-1)
 
-        # 3. Neighbors (Slicing 로직 적용)
+        # 3. Neighbors (여기는 v0 생성 스크립트가 9차원을 만드므로 Slicing 방식 유지)
         if self.use_neighbors:
             raw_nb = torch.from_numpy(self.x_nb[real_idx].copy()) 
             nb_mask = torch.from_numpy(self.mask[real_idx].copy())
@@ -123,14 +144,11 @@ class MmapDataset(Dataset):
             # (3) Nb Static
             if self.use_nb_static and self.nb_static is not None:
                 nstat = torch.from_numpy(self.nb_static[real_idx].copy())
-
                 if nstat.ndim == 2:  # (K, D) -> (T, K, D)
                     nstat = nstat.unsqueeze(0).expand(x_nb.shape[0], -1, -1)
-                elif nstat.ndim != 3:
-                    raise RuntimeError(f"nb_static shape unexpected: {tuple(nstat.shape)}")
-
                 x_nb = torch.cat([x_nb, nstat], dim=-1)
         else:
+            # Neighbor 사용 안함
             nb_shape = self.x_nb[real_idx].shape
             T, K, _ = nb_shape
             x_nb = torch.zeros((T, K, 0), dtype=torch.float32)
@@ -166,6 +184,7 @@ class MmapDataset(Dataset):
             out["meta"] = {
                 "recordingId": int(self.meta_rec[real_idx]),
                 "trackId": int(self.meta_track[real_idx]),
+                "dataset_name": str(self.tag),
                 "t0_frame": int(self.meta_frame[real_idx]),
             }
         return out

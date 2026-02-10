@@ -30,6 +30,8 @@ def get_shapes(valid_file_path: Path):
             T = shapes["x_hist"][0]
             shp.insert(1, T)
         shapes["nb_static"] = tuple(shp[1:])
+    if "ego_safety" in d:
+        shapes["ego_safety"] = d["ego_safety"].shape[1:]
 
     return shapes
 
@@ -304,6 +306,11 @@ def main():
         fp_nstat = open_memmap(out_dir / f"{tag}_nb_static.npy", mode="w+", dtype="float32",
                                shape=(total_samples, *shapes["nb_static"]))
 
+    fp_safe = None
+    if "ego_safety" in shapes:
+        fp_safe = open_memmap(out_dir / f"{tag}_ego_safety.npy", mode="w+", dtype="float32",
+                              shape=(total_samples, *shapes["ego_safety"]))
+
     meta_rec = np.zeros(total_samples, dtype=np.int32)
     meta_track = np.zeros(total_samples, dtype=np.int32)
     meta_frame = np.zeros(total_samples, dtype=np.int32)
@@ -352,6 +359,9 @@ def main():
             # Optional static
             if fp_estat is not None and "ego_static" in d:
                 fp_estat[cursor:end] = d["ego_static"][sel].astype(np.float32)
+
+            if fp_safe is not None and "ego_safety" in d:
+                fp_safe[cursor:end] = d["ego_safety"][sel].astype(np.float32)
 
             ns_val = None
             if fp_nstat is not None and "nb_static" in d:
@@ -409,6 +419,8 @@ def main():
         fp_ya.flush()
     if fp_estat is not None:
         fp_estat.flush()
+    if fp_safe is not None:
+        fp_safe.flush()
     if fp_nstat is not None:
         fp_nstat.flush()
 
