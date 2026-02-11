@@ -179,13 +179,13 @@ def main():
     stats_path = stats_dir / stats_fname
 
     compute_stats_if_needed(
+        tag=tag,
         stats_path=stats_path,
         data_dir=data_dirs,
         splits_dir=splits_dirs,
         stats_split="train",
         batch_size=int(cfg.get("data", {}).get("batch_size", 512)),
         num_workers=int(cfg.get("data", {}).get("num_workers", 16)),
-        data_tag=tag,
         use_neighbors=use_neighbors,
         use_ego_static=use_ego_static,
         use_nb_static=use_nb_static,
@@ -215,29 +215,30 @@ def main():
         "use_ego_static": use_ego_static,
         "use_nb_static": use_nb_static,
         "use_neighbors": use_neighbors,
+        "use_lead": use_lead,
         "use_lc_state": use_lc_state,
         "use_dxtime": use_dxtime,
         "use_gate": use_gate,
         "stats": stats,
         "return_meta": True,
-        "is_pre_normalized": False,  # ✅ train과 동일
+        "is_pre_normalized": False, 
     }
 
     eval_targets = []
 
     if mode == "exid":
-        full = MmapDataset(exid_dir, tag, dataset_name="exid", **ds_kwargs)
+        full = MmapDataset(tag, exid_dir, **ds_kwargs)
         subset = Subset(full, split_indices)
         eval_targets.append(("exid", subset))
 
     elif mode == "highd":
-        full = MmapDataset(highd_dir, tag, dataset_name="highd", **ds_kwargs)
+        full = MmapDataset(tag, highd_dir, **ds_kwargs)
         subset = Subset(full, split_indices)
         eval_targets.append(("highd", subset))
 
     else:
-        exid_full = MmapDataset(exid_dir, tag, dataset_name="exid", **ds_kwargs)
-        highd_full = MmapDataset(highd_dir, tag, dataset_name="highd", **ds_kwargs)
+        exid_full = MmapDataset(tag, exid_dir, **ds_kwargs)
+        highd_full = MmapDataset(tag, highd_dir, **ds_kwargs)
 
         combined_full = ConcatDataset([exid_full, highd_full])
         combined_subset = Subset(combined_full, split_indices)
