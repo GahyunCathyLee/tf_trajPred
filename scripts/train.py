@@ -105,6 +105,7 @@ def main() -> None:
     use_lc_state = bool(feat_cfg.get("use_lc_state", True))
     use_dxtime = bool(feat_cfg.get("use_dxtime", True))
     use_gate = bool(feat_cfg.get("use_gate", True))
+    nb_kin_mode = str(feat_cfg.get("nb_kin_mode", "pva")).lower().strip()
 
     print("==== Feature Toggles ====")
     print(f"use_neighbors  = {use_neighbors}")
@@ -114,6 +115,7 @@ def main() -> None:
     print(f"use_lc_state   = {use_lc_state}")
     print(f"use_dxtime     = {use_dxtime}")
     print(f"use_gate       = {use_gate}\n")
+    print(f"nb_kin_mode    = {nb_kin_mode}\n")
 
     # Scenario Sampling Check (Used for return_meta decision)
     labels_lut = None
@@ -168,6 +170,7 @@ def main() -> None:
         use_lc_state=use_lc_state,
         use_dxtime=use_dxtime,
         use_gate=use_gate,
+        nb_kin_mode=nb_kin_mode,
     )
     
     stats = None
@@ -201,6 +204,7 @@ def main() -> None:
         use_lc_state=use_lc_state,
         use_dxtime=use_dxtime,
         use_gate=use_gate,
+        nb_kin_mode=nb_kin_mode,
     )
 
     stats = load_stats_npz_strict(stats_path)
@@ -230,7 +234,8 @@ def main() -> None:
         "use_lead": use_lead,
         "use_lc_state": use_lc_state, 
         "use_dxtime": use_dxtime,     
-        "use_gate": use_gate,         
+        "use_gate": use_gate, 
+        "nb_kin_mode": nb_kin_mode,        
         "stats": stats,
         "return_meta": use_scenario_sampling,
         "is_pre_normalized": False,
@@ -243,7 +248,8 @@ def main() -> None:
         "use_lead": use_lead,
         "use_lc_state": use_lc_state, 
         "use_dxtime": use_dxtime,     
-        "use_gate": use_gate,         
+        "use_gate": use_gate,
+        "nb_kin_mode": nb_kin_mode,         
         "stats": stats,
         "return_meta": True,
         "is_pre_normalized": False,

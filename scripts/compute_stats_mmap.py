@@ -90,6 +90,7 @@ def main() -> None:
     ap.add_argument("--use_lc_state", action="store_true")
     ap.add_argument("--use_dxtime", action="store_true")
     ap.add_argument("--use_gate", action="store_true")
+    ap.add_argument("--nb_kin_mode", type=str, default="pva", choices=["p", "v", "a", "pv", "pa", "va", "pva"])
 
     args = ap.parse_args()
 
@@ -121,6 +122,7 @@ def main() -> None:
             use_lc_state=args.use_lc_state,
             use_dxtime=args.use_dxtime,
             use_gate=args.use_gate,
+            nb_kin_mode=args.nb_kin_mode,
             is_pre_normalized=False,
         )
         datasets.append(ds)

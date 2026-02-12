@@ -101,6 +101,7 @@ def make_stats_filename(
     use_lc_state: bool,
     use_dxtime: bool,
     use_gate: bool,
+    nb_kin_mode: str = "pva",
 ) -> str:
     suffix = ""
     if not use_ego_static:
@@ -119,6 +120,12 @@ def make_stats_filename(
         suffix += "_dxt0"
     if not use_gate:
         suffix += "_gt0"
+
+    nb_kin_mode = str(nb_kin_mode).lower().strip()
+    allowed = {"p","v","a","pv","pa","va","pva"}
+    if nb_kin_mode not in allowed:
+        raise ValueError(f"nb_kin_mode must be one of {sorted(allowed)}, got: {nb_kin_mode}")
+    suffix += f"_{nb_kin_mode}"
 
     return f"{tag}{suffix}.npz"
 
@@ -144,6 +151,7 @@ def compute_stats_if_needed(
     use_lc_state: bool,
     use_dxtime: bool,
     use_gate: bool,
+    nb_kin_mode: str,
 ) -> None:
 
     if stats_path.exists():
@@ -161,7 +169,6 @@ def compute_stats_if_needed(
 
     root = Path(__file__).resolve().parents[1]
 
-    # ✅ mmap용 stats 스크립트 호출
     compute_stats_py = root / "scripts" / "compute_stats_mmap.py"
     if not compute_stats_py.exists():
         raise FileNotFoundError(f"Missing: {compute_stats_py}")
@@ -196,6 +203,8 @@ def compute_stats_if_needed(
         cmd.append("--use_dxtime")
     if use_gate:
         cmd.append("--use_gate")
+
+    cmd += ["--nb_kin_mode", str(nb_kin_mode)]
 
     print("[INFO] Auto-computing MMAP stats with command:")
     print("  " + " ".join(cmd))
