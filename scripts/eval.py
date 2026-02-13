@@ -121,6 +121,7 @@ def main():
     use_lc_state = bool(feat_cfg.get("use_lc_state", True))
     use_dxtime = bool(feat_cfg.get("use_dxtime", True))
     use_gate = bool(feat_cfg.get("use_gate", True))
+    nb_kin_mode = str(feat_cfg.get("nb_kin_mode", "pva")).lower().strip()
 
     print("==== Feature Toggles ====")
     print(f"use_neighbors  = {use_neighbors}")
@@ -130,6 +131,7 @@ def main():
     print(f"use_lc_state   = {use_lc_state}")
     print(f"use_dxtime     = {use_dxtime}")
     print(f"use_gate       = {use_gate}")
+    print(f"nb_kin_mode    = {nb_kin_mode}\n")
 
     # -------------------------
     # Paths
@@ -161,6 +163,7 @@ def main():
         use_lc_state=use_lc_state,
         use_dxtime=use_dxtime,
         use_gate=use_gate,
+        nb_kin_mode=nb_kin_mode,
     )
 
     if mode == "exid":
@@ -193,6 +196,7 @@ def main():
         use_lc_state=use_lc_state,
         use_dxtime=use_dxtime,
         use_gate=use_gate,
+        nb_kin_mode=nb_kin_mode,
     )
 
     stats = load_stats_npz_strict(stats_path)
@@ -219,6 +223,7 @@ def main():
         "use_lc_state": use_lc_state,
         "use_dxtime": use_dxtime,
         "use_gate": use_gate,
+        "nb_kin_mode": nb_kin_mode,  
         "stats": stats,
         "return_meta": True,
         "is_pre_normalized": False, 
