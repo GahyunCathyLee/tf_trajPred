@@ -39,7 +39,7 @@ class MmapDataset(Dataset):
         self.use_gate = use_gate
 
         nb_kin_mode = str(nb_kin_mode).lower().strip()
-        allowed = {"p","v","a","pv","pa","va","pva"}
+        allowed = {"p","v","a","pv","pa","va","pva", "none"}
         if nb_kin_mode not in allowed:
             raise ValueError(f"nb_kin_mode must be one of {sorted(allowed)}, got: {nb_kin_mode}")
         self.nb_kin_mode = nb_kin_mode
@@ -150,10 +150,12 @@ class MmapDataset(Dataset):
                 kin = kin6[..., 2:6]                 # dvx, dvy, dax, day
             elif m == "pva":
                 kin = kin6                           # dx, dy, dvx, dvy, dax, day
+            elif m == "none":
+                kin = None
             else:
                 raise ValueError(f"Unknown nb_kin_mode: {self.nb_kin_mode}")
 
-            nb_parts = [kin]
+            nb_parts = [kin] if kin is not None else []
             
             # (2) 추가 Feature (Index 6: LC, 7: DxTime, 8: Gate)
             if self.use_lc_state:
@@ -171,6 +173,11 @@ class MmapDataset(Dataset):
                 if nstat.ndim == 2:  # (K, D) -> (T, K, D)
                     nstat = nstat.unsqueeze(0).expand(x_nb.shape[0], -1, -1)
                 x_nb = torch.cat([x_nb, nstat], dim=-1)
+
+            if len(nb_parts) == 0:
+                raise RuntimeError(
+                    "Neighbor feature is empty: nb_kin_mode='none' and all aux features disabled."
+                )
         else:
             # Neighbor 사용 안함
             nb_shape = self.x_nb[real_idx].shape

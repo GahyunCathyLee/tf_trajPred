@@ -107,14 +107,14 @@ def main() -> None:
     use_gate = bool(feat_cfg.get("use_gate", True))
     nb_kin_mode = str(feat_cfg.get("nb_kin_mode", "pva")).lower().strip()
 
-    print("==== Feature Toggles ====")
+    print("\n==== Feature Toggles ====")
     print(f"use_neighbors  = {use_neighbors}")
     print(f"use_ego_static = {use_ego_static}")
     print(f"use_lead       = {use_lead}")
     print(f"use_nb_static  = {use_nb_static}")
     print(f"use_lc_state   = {use_lc_state}")
     print(f"use_dxtime     = {use_dxtime}")
-    print(f"use_gate       = {use_gate}\n")
+    print(f"use_gate       = {use_gate}")
     print(f"nb_kin_mode    = {nb_kin_mode}\n")
 
     # Scenario Sampling Check (Used for return_meta decision)

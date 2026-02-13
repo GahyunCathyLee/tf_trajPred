@@ -90,7 +90,7 @@ def main() -> None:
     ap.add_argument("--use_lc_state", action="store_true")
     ap.add_argument("--use_dxtime", action="store_true")
     ap.add_argument("--use_gate", action="store_true")
-    ap.add_argument("--nb_kin_mode", type=str, default="pva", choices=["p", "v", "a", "pv", "pa", "va", "pva"])
+    ap.add_argument("--nb_kin_mode", type=str, default="pva", choices=["p", "v", "a", "pv", "pa", "va", "pva", "none"])
 
     args = ap.parse_args()
 

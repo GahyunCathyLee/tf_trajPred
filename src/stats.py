@@ -122,7 +122,7 @@ def make_stats_filename(
         suffix += "_gt0"
 
     nb_kin_mode = str(nb_kin_mode).lower().strip()
-    allowed = {"p","v","a","pv","pa","va","pva"}
+    allowed = {"p","v","a","pv","pa","va","pva", "none"}
     if nb_kin_mode not in allowed:
         raise ValueError(f"nb_kin_mode must be one of {sorted(allowed)}, got: {nb_kin_mode}")
     suffix += f"_{nb_kin_mode}"

@@ -353,7 +353,7 @@ def train_one_epoch(
     total_fde_t  = torch.zeros((), device=device)
     n = 0
 
-    pbar = tqdm(loader, desc=f"train ep{epoch}", dynamic_ncols=True, leave=False)
+    pbar = tqdm(loader, desc=f"Train", dynamic_ncols=True, leave=False)
 
     for it, batch in enumerate(pbar):
         x_ego = batch["x_ego"].to(device, non_blocking=True)
@@ -407,7 +407,6 @@ def train_one_epoch(
         global_step += 1
 
         if it % log_every == 0:
-            lr = optimizer.param_groups[0]["lr"]
             if _any_nonfinite(x_ego) or _any_nonfinite(x_nb) or _any_nonfinite(y_abs):
                 print(f"[BAD INPUT] ep={epoch} it={it}")
                 raise RuntimeError("Non-finite in inputs")
@@ -419,8 +418,6 @@ def train_one_epoch(
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}",
                 ADE=f"{a.item():.3f}",
-                FDE=f"{f.item():.3f}",
-                lr=f"{lr:.1e}",
             )
 
     return {
