@@ -11,6 +11,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler, Subset
 from torch.amp import GradScaler
+from torch.utils.tensorboard import SummaryWriter
 
 import yaml
 
@@ -21,7 +22,7 @@ from src.engine import train_one_epoch, evaluate
 from src.scenarios import load_window_labels_csv, build_sample_weights
 
 from src.datasets.mmap_dataset import MmapDataset
-from src.stats import make_stats_filename, compute_stats_if_needed, load_stats_npz_strict
+from src.stats import make_stats_filename, compute_stats_if_needed, load_stats_npz_strict, make_stats_filename2
 
 
 def compute_weights_fast(dataset, labels_df, mode="event", alpha=1.0, unknown_w=0.0, clip_max=None):
@@ -106,6 +107,9 @@ def main() -> None:
     use_dxtime = bool(feat_cfg.get("use_dxtime", True))
     use_gate = bool(feat_cfg.get("use_gate", True))
     nb_kin_mode = str(feat_cfg.get("nb_kin_mode", "pva")).lower().strip()
+    t_back = int(cfg.get("data", {}).get("T_back", 3))
+    t_front = int(cfg.get("data", {}).get("T_front", 5))
+    vy_eps = float(cfg.get("data", {}).get("vy_eps", 0.27))
 
     print("\n==== Feature Toggles ====")
     print(f"use_neighbors  = {use_neighbors}")
@@ -153,6 +157,10 @@ def main() -> None:
     ckpt_dir = resolve_path(cfg.get("train", {}).get("ckpt_dir", "ckpts"))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    tb_log_dir = ckpt_dir / "tb_logs"
+    writer = SummaryWriter(log_dir=str(tb_log_dir))
+    print(f"[INFO] TensorBoard log dir: {tb_log_dir}")
+
     event_csv = ckpt_dir / "val_stratified_event.csv"
     state_csv = ckpt_dir / "val_stratified_state.csv"
 
@@ -160,7 +168,7 @@ def main() -> None:
     # 4. Stats Loading (Ablation Support)
     # -------------------------
     print(f"[INFO] Loading Stats...")
-
+    '''
     stats_fname = make_stats_filename(
         tag=tag,
         use_ego_static=use_ego_static,
@@ -172,7 +180,14 @@ def main() -> None:
         use_gate=use_gate,
         nb_kin_mode=nb_kin_mode,
     )
-    
+    '''
+
+    stats_fname = make_stats_filename2(
+        T_back=t_back,
+        T_front=t_front,
+        vy_eps=vy_eps
+    )
+
     stats = None
     if mode == "exid":
         stats_dir = Path("./data/exiD/stats")
@@ -420,6 +435,19 @@ def main() -> None:
             f"train: loss={tr['loss']:.4f} ADE={tr['ade']:.3f} | "
             f"val: loss={va['loss']:.4f} ADE={va['ade']:.3f} RMSE={va['rmse']:.3f} FDE={va['fde']:.3f}"
         )
+
+        # --- TensorBoard Logging ---
+        # Loss
+        writer.add_scalars("Loss", {"train": tr["loss"], "val": va["loss"]}, ep)
+
+        # Metrics
+        writer.add_scalars("ADE",  {"train": tr["ade"],  "val": va["ade"]},  ep)
+        writer.add_scalar("Val/RMSE", va["rmse"], ep)
+        writer.add_scalar("Val/FDE",  va["fde"],  ep)
+
+        # Learning Rate
+        current_lr = optimizer.param_groups[0]["lr"]
+        writer.add_scalar("Train/LR", current_lr, ep)
         
         if monitor == "val_loss": score = va["loss"]
         elif monitor == "val_ade": score = va["ade"]
@@ -459,6 +487,8 @@ def main() -> None:
     print("\n[DONE] Training finished.")
     print(f"Best {monitor}: {best:.4f}")
     print(f"{best_path}")
+
+    writer.close()
 
 
 if __name__ == "__main__":

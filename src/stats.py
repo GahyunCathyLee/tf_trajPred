@@ -91,6 +91,15 @@ def load_stats_for_ablation(
         "nb_std": nb_std
     }
 
+def make_stats_filename2(
+    *,
+    T_back: int,
+    T_front: int,
+    vy_eps: float
+) -> str:
+    vy_int = int(round(vy_eps * 100))
+    return f"TB{T_back}_TF{T_front}_vy{vy_int:02d}.npz"
+
 def make_stats_filename(
     *,
     tag: str,

@@ -29,6 +29,10 @@ import pandas as pd
 import pickle
 import re
 
+import concurrent.futures
+from functools import partial
+from tqdm import tqdm
+
 # =========================
 # Constants & Config
 # =========================
@@ -54,6 +58,28 @@ CLASS_VOCAB = [
 ]
 VRU_CLASSES = {"motorcycle", "bicycle", "pedestrian"}
 
+
+def process_file_wrapper(tracks_csv, out_dir, args, adj_db, drop_vru):
+    out_path = out_dir / f"exid_{tracks_csv.stem.replace('_tracks','')}.npz"
+    n, err = make_windows_for_tracks_csv(
+        tracks_csv=tracks_csv,
+        out_path=out_path,
+        source_hz=args.source_hz,
+        target_hz=args.target_hz,
+        history_sec=args.history_sec,
+        future_sec=args.future_sec,
+        stride_sec=args.stride_sec,
+        min_speed_mps=args.min_speed_mps,
+        drop_vru=drop_vru,
+        keep_only_vru_cases=args.keep_only_vru_cases,
+        adjacent_only=args.adjacent_only,
+        adj_db=adj_db,
+        t_front=args.t_front,
+        t_back=args.t_back,
+        vy_eps=args.vy_eps,
+        eps_gate=args.eps_gate,
+    )
+    return tracks_csv.name, n, err
 
 def compute_downsample_step(source_hz: float, target_hz: float) -> int:
     step = int(round(float(source_hz) / float(target_hz)))
@@ -628,9 +654,9 @@ def make_windows_for_tracks_csv(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tracks_dir", type=str, default="raw/", help="Directory containing *_tracks.csv")
+    ap.add_argument("--tracks_dir", type=str, default="data/exiD/raw/", help="Directory containing *_tracks.csv")
     ap.add_argument("--glob", type=str, default="*_tracks.csv", help="Glob pattern")
-    ap.add_argument("--out_root", type=str, default="data_npz", help="Output root directory")
+    ap.add_argument("--out_root", type=str, default="data/exiD/data_npz", help="Output root directory")
 
     ap.add_argument("--source_hz", type=int, default=25)
     ap.add_argument("--target_hz", type=int, default=3)
@@ -643,7 +669,7 @@ def main():
     ap.add_argument("--keep_only_vru_cases", action="store_true", help="Keep ONLY windows involving VRU.")
     
     ap.add_argument("--adjacent_only", action="store_true", help="Filter neighbors: include only those in physically adjacent lanelets.")
-    ap.add_argument("--lanelet_adj_pkl", type=str, default="maps/lanelet_adj_allmaps.pkl", help="Path to adjacency pickle.")
+    ap.add_argument("--lanelet_adj_pkl", type=str, default="data/exiD/maps/lanelet_adj_allmaps.pkl", help="Path to adjacency pickle.")
 
     # New Params for Gating/LC
     ap.add_argument("--t_front", type=float, default=3, help="Time gate front")
@@ -652,6 +678,17 @@ def main():
     ap.add_argument("--eps_gate", type=float, default=0.1, help="Small epsilon for dx_time division")
 
     args = ap.parse_args()
+
+    # ---- 새로운 네이밍 규칙 적용 ----
+    T_back = int(round(args.t_back))
+    T_front = int(round(args.t_front))
+    vy_eps = float(args.vy_eps)
+    vy_int = int(round(vy_eps * 100))
+
+    tag = f"TB{T_back}_TF{T_front}_vy{vy_int:02d}"
+
+    out_dir = Path(args.out_root) / f"exid_{tag}"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine VRU policy
     drop_vru = True if (not args.keep_only_vru_cases) else False
@@ -665,13 +702,6 @@ def main():
         if not adj_db:
             print("[WARN] Adjacency filter enabled but DB empty or not found. Neighbors will NOT be filtered correctly.")
 
-    T_sec = int(round(args.history_sec))
-    Tf_sec = int(round(args.future_sec))
-    hz = int(round(args.target_hz))
-
-    out_dir = Path(args.out_root) / f"exid_T{T_sec}_Tf{Tf_sec}_hz{hz}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     tracks_dir = Path(args.tracks_dir)
     files = sorted(tracks_dir.glob(args.glob))
     if not files:
@@ -679,33 +709,20 @@ def main():
 
     total = 0
     ok_files = 0
-    for tracks_csv in files:
-        out_path = out_dir / f"exid_{tracks_csv.stem.replace('_tracks','')}.npz"
-        n, err = make_windows_for_tracks_csv(
-            tracks_csv=tracks_csv,
-            out_path=out_path,
-            source_hz=args.source_hz,
-            target_hz=args.target_hz,
-            history_sec=args.history_sec,
-            future_sec=args.future_sec,
-            stride_sec=args.stride_sec,
-            min_speed_mps=args.min_speed_mps,
-            drop_vru=drop_vru,
-            keep_only_vru_cases=args.keep_only_vru_cases,
-            adjacent_only=args.adjacent_only,
-            adj_db=adj_db,
-            t_front=args.t_front,
-            t_back=args.t_back,
-            vy_eps=args.vy_eps,
-            eps_gate=args.eps_gate,
-        )
-        if err is not None:
-            print(f"[SKIP] {tracks_csv.name}  reason={err}")
-            continue
 
-        print(f"[OK] {tracks_csv.name} -> {out_path.name}  samples={n}")
-        total += n
-        ok_files += 1
+    print(f"[INFO] Starting parallel processing with {concurrent.futures.ProcessPoolExecutor()._max_workers} cores...")
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        func = partial(process_file_wrapper, out_dir=out_dir, args=args, adj_db=adj_db, drop_vru=drop_vru)
+        
+        futures = {executor.submit(func, f): f for f in files}
+        
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(files), desc="Processing"):
+            name, n, err = future.result()
+            if err is not None:
+                print(f"[SKIP] {name}  reason={err}")
+            else:
+                total += n
+                ok_files += 1
 
     print(f"[DONE] ok_files={ok_files}/{len(files)} total_samples={total}")
 

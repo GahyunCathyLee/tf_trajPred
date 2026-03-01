@@ -46,6 +46,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
+import concurrent
+import concurrent.futures
+from functools import partial
+from tqdm import tqdm
+
 import numpy as np
 import pandas as pd
 
@@ -669,18 +674,17 @@ def main_one_recording(cfg: Config, rec_id: str) -> None:
         vy_eps=np.array([cfg.vy_eps], dtype=np.float32),
         eps_gate=np.array([cfg.eps_gate], dtype=np.float32),
     )
-    print(f"[OK] {rec_id} -> {out_path.name}  samples={len(x_hist_arr)}")
 
 
 def parse_args() -> Config:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--raw_dir", type=str, default="raw/", help="Directory containing highD *_tracks.csv, *_tracksMeta.csv, *_recordingMeta.csv")
-    ap.add_argument("--out_dir", type=str, default="data_npz", help="Output directory for npz files")
+    ap.add_argument("--raw_dir", type=str, default="data/highD/raw/", help="Directory containing highD *_tracks.csv, *_tracksMeta.csv, *_recordingMeta.csv")
+    ap.add_argument("--out_dir", type=str, default="data/highD/data_npz", help="Output directory for npz files")
     ap.add_argument("--history_sec", type=float, default=2.0)
     ap.add_argument("--future_sec", type=float, default=5.0)
     ap.add_argument("--target_hz", type=float, default=3.0)
     ap.add_argument("--stride_sec", type=float, default=1.0, help="Sampling stride in seconds between consecutive windows (on target_hz grid)")
-    ap.add_argument("--normalize_upper_xy", action="store_true", help="Flip (x,y,vel,acc,laneId) for drivingDirection==1 to unify directions")
+    ap.add_argument("--normalize_upper_xy", action="store_true", default=True, help="Flip (x,y,vel,acc,laneId) for drivingDirection==1 to unify directions")
     ap.add_argument("--recording_offset", type=int, default=100, help="Map highD 01..60 -> 101..160 by default")
     ap.add_argument("--min_speed_mps", type=float, default=0.0, help="Drop samples whose mean speed over history is below this")
 
@@ -692,11 +696,16 @@ def parse_args() -> Config:
 
     args = ap.parse_args()
 
-    # auto out_dir naming (keep your style)
-    T_sec = int(round(args.history_sec))
-    Tf_sec = int(round(args.future_sec))
-    hz = int(round(args.target_hz))
-    out_dir = Path(args.out_dir) / f"highd_T{T_sec}_Tf{Tf_sec}_hz{hz}"
+    # ---- 새로운 네이밍 규칙 적용 ----
+    T_back = int(round(args.t_back))
+    T_front = int(round(args.t_front))
+    vy_eps = float(args.vy_eps)
+    vy_int = int(round(vy_eps * 100))
+
+    tag = f"TB{T_back}_TF{T_front}_vy{vy_int:02d}"
+    
+    # out_dir을 tag를 포함하도록 변경
+    out_dir = Path(args.out_dir) / f"highd_{tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     return Config(
@@ -719,11 +728,14 @@ def parse_args() -> Config:
 def main():
     cfg = parse_args()
     rec_ids = find_recording_ids(cfg.raw_dir)
-    if not rec_ids:
-        raise SystemExit(f"No *_tracks.csv found under {cfg.raw_dir}")
-
-    for rec_id in rec_ids:
-        main_one_recording(cfg, rec_id)
+    
+    # 병렬 실행
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        # main_one_recording 함수를 각 rec_id에 대해 실행
+        futures = [executor.submit(main_one_recording, cfg, rid) for rid in rec_ids]
+        
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(rec_ids), desc="HighD Parallel"):
+            future.result()
 
 
 if __name__ == "__main__":

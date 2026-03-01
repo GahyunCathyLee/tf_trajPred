@@ -9,8 +9,13 @@ from pathlib import Path
 from typing import Callable, Dict, Any, Optional
 import time
 
-def make_ttag(T: int, Tf: int, hz: int) -> str:
-    return f"T{T}_Tf{Tf}_hz{hz}"
+def make_ttag(T_back: int, T_front: int, vy_eps: float) -> str:
+    """
+    T_back, T_front는 정수, vy_eps는 소수점 둘째자리까지 정수화 (예: 0.05 -> 05)
+    결과 포맷: TF{T_front}_TB{T_back}_vy{xx}
+    """
+    vy_int = int(round(vy_eps * 100))
+    return f"TB{T_back}_TF{T_front}_vy{vy_int:02d}"
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -19,20 +24,22 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 def resolve_data_paths(cfg: dict) -> dict:
-    T  = int(cfg["data"]["T"])
-    Tf = int(cfg["data"]["Tf"])
-    hz = int(cfg["data"]["hz"])
-    tag = make_ttag(T, Tf, hz)
+    # Config에서 T_back, T_front, vy_eps를 가져옴 (없으면 기본값 사용)
+    T_back  = int(cfg["data"].get("T_back", 5))
+    T_front = int(cfg["data"].get("T_front", 3))
+    vy_eps  = float(cfg["data"].get("vy_eps", 0.27))
+    
+    tag = make_ttag(T_back, T_front, vy_eps)
 
     roots = cfg["data"]["roots"]
     exid_dir = Path(roots["exid_root"])
     exid_pt_dir  = Path(roots["exid_pt_root"])  / f"exid_{tag}"
-    exid_splits_dir = Path(roots["exid_root"]) / "splits"
+    exid_splits_dir = exid_dir / "splits"
     exid_stats_dir = exid_dir / "stats"
     
     highd_dir = Path(roots["highd_root"])
     highd_pt_dir = Path(roots["highd_pt_root"]) / f"highd_{tag}"
-    highd_splits_dir = Path(roots["highd_root"]) / "splits"
+    highd_splits_dir = highd_dir / "splits"
     highd_stats_dir = highd_dir / "stats"
 
     combined_dir = Path(roots["combined_root"])

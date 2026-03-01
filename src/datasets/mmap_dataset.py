@@ -47,51 +47,51 @@ class MmapDataset(Dataset):
         self.is_pre_normalized = is_pre_normalized
 
         # 1. Main Ego File (Dimension: 13)
-        self.x_ego = np.load(self.data_dir / f"{tag}_x_ego.npy", mmap_mode='r')
+        self.x_ego = np.load(self.data_dir / f"x_ego.npy", mmap_mode='r')
         
         # 2. Safety File (Dimension: 5) - v0 스크립트가 생성한 파일
         self.x_safe = None
         # use_lead가 True일 때만 로드 시도
         if self.use_lead:
-            safe_path = self.data_dir / f"{tag}_ego_safety.npy"
+            safe_path = self.data_dir / f"ego_safety.npy"
             if safe_path.exists():
                 self.x_safe = np.load(safe_path, mmap_mode='r')
             else:
                 print(f"[WARN] use_lead=True but {safe_path.name} not found. Safety features will be zeros.")
 
         # 3. Neighbors (Dimension: 9)
-        self.x_nb = np.load(self.data_dir / f"{tag}_x_nb.npy", mmap_mode='r')
-        self.mask = np.load(self.data_dir / f"{tag}_nb_mask.npy", mmap_mode='r')
+        self.x_nb = np.load(self.data_dir / f"x_nb.npy", mmap_mode='r')
+        self.mask = np.load(self.data_dir / f"nb_mask.npy", mmap_mode='r')
         
         # 4. Targets & Others
-        self.y = np.load(self.data_dir / f"{tag}_y.npy", mmap_mode='r')
-        self.x_last = np.load(self.data_dir / f"{tag}_x_last_abs.npy", mmap_mode='r')
+        self.y = np.load(self.data_dir / f"y.npy", mmap_mode='r')
+        self.x_last = np.load(self.data_dir / f"x_last_abs.npy", mmap_mode='r')
         
         # Optional Files
         self.y_vel = None
-        if (self.data_dir / f"{tag}_y_vel.npy").exists():
-            self.y_vel = np.load(self.data_dir / f"{tag}_y_vel.npy", mmap_mode='r')
+        if (self.data_dir / f"y_vel.npy").exists():
+            self.y_vel = np.load(self.data_dir / f"y_vel.npy", mmap_mode='r')
             
         self.y_acc = None
-        if (self.data_dir / f"{tag}_y_acc.npy").exists():
-            self.y_acc = np.load(self.data_dir / f"{tag}_y_acc.npy", mmap_mode='r')
+        if (self.data_dir / f"y_acc.npy").exists():
+            self.y_acc = np.load(self.data_dir / f"y_acc.npy", mmap_mode='r')
 
         self.ego_static = None
-        if (self.data_dir / f"{tag}_ego_static.npy").exists():
-            self.ego_static = np.load(self.data_dir / f"{tag}_ego_static.npy", mmap_mode='r')
+        if (self.data_dir / f"ego_static.npy").exists():
+            self.ego_static = np.load(self.data_dir / f"ego_static.npy", mmap_mode='r')
             
         self.nb_static = None
-        if (self.data_dir / f"{tag}_nb_static.npy").exists():
-            self.nb_static = np.load(self.data_dir / f"{tag}_nb_static.npy", mmap_mode='r')
+        if (self.data_dir / f"nb_static.npy").exists():
+            self.nb_static = np.load(self.data_dir / f"nb_static.npy", mmap_mode='r')
 
         # Meta Load 
         self.meta_rec = None
         self.meta_track = None
         self.meta_frame = None
         if return_meta:
-            self.meta_rec = np.load(self.data_dir / f"{tag}_meta_recordingId.npy", mmap_mode='r')
-            self.meta_track = np.load(self.data_dir / f"{tag}_meta_trackId.npy", mmap_mode='r')
-            self.meta_frame = np.load(self.data_dir / f"{tag}_meta_frame.npy", mmap_mode='r')
+            self.meta_rec = np.load(self.data_dir / f"meta_recordingId.npy", mmap_mode='r')
+            self.meta_track = np.load(self.data_dir / f"meta_trackId.npy", mmap_mode='r')
+            self.meta_frame = np.load(self.data_dir / f"meta_frame.npy", mmap_mode='r')
 
         self.indices = split_indices if split_indices is not None else np.arange(len(self.x_ego))
 

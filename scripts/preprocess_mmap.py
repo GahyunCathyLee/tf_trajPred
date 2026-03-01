@@ -207,7 +207,6 @@ def main():
 
     ap.add_argument("--npz_dir", type=str, required=True)
     ap.add_argument("--out_dir", type=str, required=True)
-    ap.add_argument("--tag", type=str, required=True)
     ap.add_argument("--calc_stats", action="store_true")
 
     # New filtering options
@@ -226,7 +225,6 @@ def main():
     npz_dir = Path(args.npz_dir)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    tag = args.tag
 
     files = sorted(list(npz_dir.glob("*.npz")))
     if not files:
@@ -274,41 +272,41 @@ def main():
     # 2) Allocate memmaps using the first valid file as shape reference
     shapes = get_shapes(valid_file_info[0][0])
 
-    fp_x = open_memmap(out_dir / f"{tag}_x_ego.npy", mode="w+", dtype="float32",
+    fp_x = open_memmap(out_dir / f"x_ego.npy", mode="w+", dtype="float32",
                        shape=(total_samples, *shapes["x_hist"]))
-    fp_y = open_memmap(out_dir / f"{tag}_y.npy", mode="w+", dtype="float32",
+    fp_y = open_memmap(out_dir / f"y.npy", mode="w+", dtype="float32",
                        shape=(total_samples, *shapes["y_fut"]))
-    fp_nb = open_memmap(out_dir / f"{tag}_x_nb.npy", mode="w+", dtype="float32",
+    fp_nb = open_memmap(out_dir / f"x_nb.npy", mode="w+", dtype="float32",
                         shape=(total_samples, *shapes["nb_hist"]))
-    fp_mask = open_memmap(out_dir / f"{tag}_nb_mask.npy", mode="w+", dtype="bool",
+    fp_mask = open_memmap(out_dir / f"nb_mask.npy", mode="w+", dtype="bool",
                           shape=(total_samples, *shapes["nb_mask"]))
-    fp_last = open_memmap(out_dir / f"{tag}_x_last_abs.npy", mode="w+", dtype="float32",
+    fp_last = open_memmap(out_dir / f"x_last_abs.npy", mode="w+", dtype="float32",
                           shape=(total_samples, 2))
 
     # Optional Velocity/Acceleration memmaps
     fp_yv = None
     if shapes["y_fut_vel"] is not None:
-        fp_yv = open_memmap(out_dir / f"{tag}_y_vel.npy", mode="w+", dtype="float32",
+        fp_yv = open_memmap(out_dir / f"y_vel.npy", mode="w+", dtype="float32",
                             shape=(total_samples, *shapes["y_fut_vel"]))
 
     fp_ya = None
     if shapes["y_fut_acc"] is not None:
-        fp_ya = open_memmap(out_dir / f"{tag}_y_acc.npy", mode="w+", dtype="float32",
+        fp_ya = open_memmap(out_dir / f"y_acc.npy", mode="w+", dtype="float32",
                             shape=(total_samples, *shapes["y_fut_acc"]))
 
     fp_estat = None
     if "ego_static" in shapes:
-        fp_estat = open_memmap(out_dir / f"{tag}_ego_static.npy", mode="w+", dtype="float32",
+        fp_estat = open_memmap(out_dir / f"ego_static.npy", mode="w+", dtype="float32",
                                shape=(total_samples, *shapes["ego_static"]))
 
     fp_nstat = None
     if "nb_static" in shapes:
-        fp_nstat = open_memmap(out_dir / f"{tag}_nb_static.npy", mode="w+", dtype="float32",
+        fp_nstat = open_memmap(out_dir / f"nb_static.npy", mode="w+", dtype="float32",
                                shape=(total_samples, *shapes["nb_static"]))
 
     fp_safe = None
     if "ego_safety" in shapes:
-        fp_safe = open_memmap(out_dir / f"{tag}_ego_safety.npy", mode="w+", dtype="float32",
+        fp_safe = open_memmap(out_dir / f"ego_safety.npy", mode="w+", dtype="float32",
                               shape=(total_samples, *shapes["ego_safety"]))
 
     meta_rec = np.zeros(total_samples, dtype=np.int32)
@@ -424,9 +422,9 @@ def main():
     if fp_nstat is not None:
         fp_nstat.flush()
 
-    np.save(out_dir / f"{tag}_meta_recordingId.npy", meta_rec)
-    np.save(out_dir / f"{tag}_meta_trackId.npy", meta_track)
-    np.save(out_dir / f"{tag}_meta_frame.npy", meta_frame)
+    np.save(out_dir / f"meta_recordingId.npy", meta_rec)
+    np.save(out_dir / f"meta_trackId.npy", meta_track)
+    np.save(out_dir / f"meta_frame.npy", meta_frame)
 
     # 6) Finalize stats
     if args.calc_stats:
