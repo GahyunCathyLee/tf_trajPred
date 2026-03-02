@@ -17,7 +17,7 @@ from src.datasets.mmap_dataset import MmapDataset
 from src.datasets.collate import collate_batch
 from src.models.build import build_model
 from src.utils import set_seed, resolve_data_paths
-from src.stats import make_stats_filename, compute_stats_if_needed, load_stats_npz_strict
+from src.stats import make_stats_filename, compute_stats_if_needed, load_stats_npz_strict, make_stats_filename2
 from src.engine import evaluate
 from src.scenarios import load_window_labels_csv
 from src.log import log_eval_to_csv
@@ -123,6 +123,10 @@ def main():
     use_gate = bool(feat_cfg.get("use_gate", True))
     nb_kin_mode = str(feat_cfg.get("nb_kin_mode", "pva")).lower().strip()
 
+    t_back = int(cfg.get("data", {}).get("T_back", 5))
+    t_front = int(cfg.get("data", {}).get("T_front", 3))
+    vy_eps = float(cfg.get("data", {}).get("vy_eps", 0.27))
+
     print("==== Feature Toggles ====")
     print(f"use_neighbors  = {use_neighbors}")
     print(f"use_lead       = {use_lead}")
@@ -154,6 +158,7 @@ def main():
     # -------------------------
     print("[INFO] Loading/Ensuring stats...")
 
+    '''
     stats_fname = make_stats_filename(
         tag=tag,
         use_ego_static=use_ego_static,
@@ -164,6 +169,12 @@ def main():
         use_dxtime=use_dxtime,
         use_gate=use_gate,
         nb_kin_mode=nb_kin_mode,
+    )
+    '''
+    stats_fname = make_stats_filename2(
+        T_back=t_back,
+        T_front=t_front,
+        vy_eps=vy_eps
     )
 
     if mode == "exid":
