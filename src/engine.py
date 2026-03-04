@@ -20,7 +20,9 @@ from src.metrics import (
 )
 from src.losses import trajectory_loss, multimodal_loss
 from src.utils import _to_int, measure_latency_ms
-from src.debug.debug import _any_nonfinite, _finite_stats, _check_params_finite
+
+def _any_nonfinite(x: torch.Tensor) -> bool:
+    return not torch.isfinite(x).all()
 
 # -------------------------
 # Eval / Train loops

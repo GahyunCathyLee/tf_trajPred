@@ -1,29 +1,33 @@
 # src/losses.py
 from __future__ import annotations
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
 
 def trajectory_loss(
     pred: torch.Tensor,
     y_abs: torch.Tensor,
+    x_last_abs: torch.Tensor,
+    predict_delta: bool = False,
     w_ade: float = 1.0,
     w_fde: float = 0.0,
+    w_rmse: float = 0.0,
 ) -> torch.Tensor:
-    """
-    Optimized Trajectory Loss.
-    """
-    
-    dist = torch.norm(pred - y_abs, dim=-1) # (B, Tf)
-    l2 = dist.mean()
-    
-    loss = w_ade * l2
-    
+    if predict_delta:
+        pred = torch.cumsum(pred, dim=1) + x_last_abs[:, None, :]
+
+    dist = torch.norm(pred - y_abs, dim=-1)  # (B, Tf)
+    loss = 0.0
+
+    if w_ade > 0.0:
+        loss += w_ade * dist.mean()
+
     if w_fde > 0.0:
-        f = dist[:, -1].mean()
-        loss += w_fde * f
-        
+        loss += w_fde * dist[:, -1].mean()
+
+    if w_rmse > 0.0:
+        loss += w_rmse * torch.sqrt(torch.pow(dist, 2).mean() + 1e-6)
+
     return loss
 
 def multimodal_loss(
