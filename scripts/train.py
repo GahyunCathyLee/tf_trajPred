@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from csv import writer
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -157,9 +158,12 @@ def main() -> None:
     ckpt_dir = resolve_path(cfg.get("train", {}).get("ckpt_dir", "ckpts"))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    log_base_dir = Path("logs") / tag
+    log_base_dir.mkdir(parents=True, exist_ok=True)
+
     tb_log_dir = ckpt_dir / "tb_logs"
-    writer = SummaryWriter(log_dir=str(tb_log_dir))
-    print(f"[INFO] TensorBoard log dir: {tb_log_dir}")
+    writer = SummaryWriter(log_dir=str(log_base_dir))
+    print(f"[INFO] TensorBoard log dir: {log_base_dir}")
 
     event_csv = ckpt_dir / "val_stratified_event.csv"
     state_csv = ckpt_dir / "val_stratified_state.csv"
@@ -437,17 +441,13 @@ def main() -> None:
         )
 
         # --- TensorBoard Logging ---
-        # Loss
-        writer.add_scalars("Loss", {"train": tr["loss"], "val": va["loss"]}, ep)
-
-        # Metrics
-        writer.add_scalars("ADE",  {"train": tr["ade"],  "val": va["ade"]},  ep)
-        writer.add_scalar("Val/RMSE", va["rmse"], ep)
-        writer.add_scalar("Val/FDE",  va["fde"],  ep)
-
-        # Learning Rate
-        current_lr = optimizer.param_groups[0]["lr"]
-        writer.add_scalar("Train/LR", current_lr, ep)
+        writer.add_scalar("Loss/train", tr["loss"], ep)
+        writer.add_scalar("Loss/val", va["loss"], ep)
+        
+        writer.add_scalar("Metrics/ADE_train", tr["ade"], ep)
+        writer.add_scalar("Metrics/ADE_val", va["ade"], ep)
+        writer.add_scalar("Metrics/RMSE_val", va["rmse"], ep)
+        writer.add_scalar("Metrics/FDE_val", va["fde"], ep)
         
         if monitor == "val_loss": score = va["loss"]
         elif monitor == "val_ade": score = va["ade"]
